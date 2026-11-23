@@ -52,6 +52,16 @@ android {
             matchingFallbacks += "release"
         }
     }
+    // Release CI passes -PamneziawgSplitAbi=true to get one APK per ABI plus a universal APK.
+    // Without the property the build is unchanged (single APK / AAB with all ABIs).
+    splits {
+        abi {
+            isEnable = providers.gradleProperty("amneziawgSplitAbi").isPresent
+            reset()
+            include("armeabi-v7a", "arm64-v8a", "x86", "x86_64")
+            isUniversalApk = true
+        }
+    }
     androidResources {
         generateLocaleConfig = true
     }

@@ -20,7 +20,7 @@ on:
 jobs:
   build:
     name: "Build (${{ inputs.target }})"
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, docker-runner]
 
     steps:
     - name: Checkout
@@ -35,6 +35,13 @@ jobs:
       with:
         distribution: temurin
         java-version: "17"
+
+    # libwg-go (amneziawg-go) is built with Go during the NDK/CMake step.
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version-file: tunnel/tools/libwg-go/go.mod
+        cache-dependency-path: tunnel/tools/libwg-go/go.sum
 
     - name: Set up Gradle
       uses: gradle/actions/setup-gradle@v4
