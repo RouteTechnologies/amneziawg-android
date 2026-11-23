@@ -1,0 +1,155 @@
+name: Release (signed APKs)
+run-name: "Release • ${{ github.ref_name }}"
+
+# Push a tag such as v3.1.4 to build signed APKs (universal + one per ABI)
+# and attach them to a GitHub Release.
+on:
+  push:
+    tags:
+    - "v*"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: "Build & publish ${{ github.ref_name }}"
+    runs-on: [self-hosted, docker-runner]
+    timeout-minutes: 90
+
+    env:
+      BUILD_TOOLS_VERSION: "36.0.0"
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+      with:
+        submodules: recursive
+        fetch-depth: 0
+
+    - name: Verify tag matches app version
+      shell: bash
+      run: |
+        set -euo pipefail
+        TAG="${GITHUB_REF_NAME#v}"
+        VERSION="$(sed -n 's/^amneziawgVersionName=//p' gradle.properties)"
+        if [[ "${TAG}" != "${VERSION}" ]]; then
+          echo "Tag '${GITHUB_REF_NAME}' does not match amneziawgVersionName='${VERSION}' in gradle.properties" >&2
+          echo "Bump the version (and amneziawgVersionCode) first, then re-tag." >&2
+          exit 1
+        fi
+        echo "VERSION=${VERSION}" >> "$GITHUB_ENV"
+
+    - name: Set up JDK
+      uses: actions/setup-java@v4
+      with:
+        distribution: temurin
+        java-version: "17"
+
+    # libwg-go (amneziawg-go) is built with Go during the NDK/CMake step.
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version-file: tunnel/tools/libwg-go/go.mod
+        cache-dependency-path: tunnel/tools/libwg-go/go.sum
+
+    - name: Set up Gradle
+      uses: gradle/actions/setup-gradle@v4
+
+    - name: Set up Android SDK
+      uses: android-actions/setup-android@v3
+      with:
+        # build-tools provides zipalign + apksigner; AGP fetches the NDK/CMake it needs.
+        packages: "platform-tools build-tools;${{ env.BUILD_TOOLS_VERSION }}"
+
+    - name: Decode keystore
+      shell: bash
+      env:
+        KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+      run: |
+        set -euo pipefail
+        if [[ -z "${KEYSTORE_B64}" ]]; then
+          echo "Missing secret ANDROID_KEYSTORE_BASE64" >&2
+          exit 1
+        fi
+        KEYSTORE="${RUNNER_TEMP}/release.keystore.jks"
+        echo "${KEYSTORE_B64}" | base64 --decode > "${KEYSTORE}"
+        chmod 600 "${KEYSTORE}"
+        echo "KEYSTORE_PATH=${KEYSTORE}" >> "$GITHUB_ENV"
+
+    # -PamneziawgSplitAbi enables per-ABI APKs plus a universal APK (see ui/build.gradle.kts).
+    - name: Build release APKs
+      shell: bash
+      run: |
+        set -euo pipefail
+        chmod +x ./gradlew
+        ./gradlew --no-daemon --stacktrace -PamneziawgSplitAbi=true assembleRelease
+
+    - name: Align and sign APKs
+      id: sign
+      shell: bash
+      env:
+        KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+        KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+        KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+      run: |
+        set -euo pipefail
+        if [[ -z "${KEYSTORE_PASSWORD}" || -z "${KEY_ALIAS}" ]]; then
+          echo "Missing secrets: ANDROID_KEYSTORE_PASSWORD / ANDROID_KEY_ALIAS" >&2
+          exit 1
+        fi
+        # Fall back to the keystore password when no separate key password is set.
+        export KEY_PASSWORD="${KEY_PASSWORD:-${KEYSTORE_PASSWORD}}"
+
+        BT="${ANDROID_HOME}/build-tools/${BUILD_TOOLS_VERSION}"
+        OUT="${RUNNER_TEMP}/release-apks"
+        mkdir -p "${OUT}"
+
+        shopt -s nullglob
+        UNSIGNED=(ui/build/outputs/apk/release/*-release-unsigned.apk)
+        if (( ${#UNSIGNED[@]} == 0 )); then
+          echo "No unsigned release APKs found" >&2
+          exit 1
+        fi
+
+        for apk in "${UNSIGNED[@]}"; do
+          base="$(basename "${apk}" -release-unsigned.apk)"      # ui, ui-arm64-v8a, ...
+          name="amneziawg-${VERSION}${base#ui}.apk"               # amneziawg-3.1.4-arm64-v8a.apk
+          [[ "${base}" == "ui" ]] && name="amneziawg-${VERSION}-universal.apk"
+
+          aligned="${OUT}/${name%.apk}-aligned.apk"
+          # -P 16: 16 KB page-size aligned native libs (Android 15+ requirement).
+          "${BT}/zipalign" -f -P 16 4 "${apk}" "${aligned}"
+          "${BT}/apksigner" sign \
+            --ks "${KEYSTORE_PATH}" \
+            --ks-key-alias "${KEY_ALIAS}" \
+            --ks-pass env:KEYSTORE_PASSWORD \
+            --key-pass env:KEY_PASSWORD \
+            --out "${OUT}/${name}" \
+            "${aligned}"
+          rm -f "${aligned}" "${OUT}/${name}.idsig"
+          "${BT}/apksigner" verify --verbose "${OUT}/${name}" | head -n 5
+        done
+
+        (cd "${OUT}" && sha256sum *.apk > SHA256SUMS.txt && cat SHA256SUMS.txt)
+        echo "dir=${OUT}" >> "$GITHUB_OUTPUT"
+
+    - name: Publish GitHub Release
+      uses: softprops/action-gh-release@v2
+      with:
+        name: AmneziaWG ${{ env.VERSION }}
+        generate_release_notes: true
+        fail_on_unmatched_files: true
+        files: |
+          ${{ steps.sign.outputs.dir }}/*.apk
+          ${{ steps.sign.outputs.dir }}/SHA256SUMS.txt
+
+    # The runner keeps its workspace between jobs, so never leave the keystore behind.
+    - name: Remove keystore
+      if: ${{ always() }}
+      shell: bash
+      run: rm -f "${RUNNER_TEMP}/release.keystore.jks"
