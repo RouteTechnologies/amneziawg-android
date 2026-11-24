@@ -119,8 +119,8 @@ jobs:
 
         for apk in "${UNSIGNED[@]}"; do
           base="$(basename "${apk}" -release-unsigned.apk)"      # ui, ui-arm64-v8a, ...
-          name="amneziawg-${VERSION}${base#ui}.apk"               # amneziawg-3.1.4-arm64-v8a.apk
-          [[ "${base}" == "ui" ]] && name="amneziawg-${VERSION}-universal.apk"
+          name="routevpn-${VERSION}${base#ui}.apk"                 # routevpn-3.1.5-arm64-v8a.apk
+          [[ "${base}" == "ui" ]] && name="routevpn-${VERSION}-universal.apk"
 
           aligned="${OUT}/${name%.apk}-aligned.apk"
           # -P 16: 16 KB page-size aligned native libs (Android 15+ requirement).
@@ -142,7 +142,7 @@ jobs:
     - name: Publish GitHub Release
       uses: softprops/action-gh-release@v2
       with:
-        name: AmneziaWG ${{ env.VERSION }}
+        name: RouteVPN ${{ env.VERSION }}
         generate_release_notes: true
         fail_on_unmatched_files: true
         files: |

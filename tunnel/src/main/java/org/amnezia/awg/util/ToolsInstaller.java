@@ -134,8 +134,8 @@ public final class ToolsInstaller {
 
     @RestrictTo(Scope.LIBRARY_GROUP)
     public int install() throws RootShellException, IOException {
-        if (!context.getPackageName().startsWith("org.amnezia."))
-            throw new SecurityException("The tools may only be installed system-wide from the main AmneziaWG app.");
+        if (!context.getPackageName().startsWith("io.routedns."))
+            throw new SecurityException("The tools may only be installed system-wide from the main RouteVPN app.");
         return willInstallAsMagiskModule() ? installMagisk() : installSystem();
     }
 
@@ -145,7 +145,7 @@ public final class ToolsInstaller {
 
         script.append("trap 'rm -rf /data/adb/modules/amneziawg' INT TERM EXIT; ");
         script.append(String.format("rm -rf /data/adb/modules/amneziawg/; mkdir -p /data/adb/modules/amneziawg%s; ", INSTALL_DIR));
-        script.append("printf 'id=amneziawg\nname=AmneziaWG Command Line Tools\nversion=1.0\nversionCode=1\nauthor=amnezia\ndescription=Command line tools for AmneziaWG\nminMagisk=1500\n' > /data/adb/modules/amneziawg/module.prop; ");
+        script.append("printf 'id=amneziawg\nname=RouteVPN Command Line Tools\nversion=1.0\nversionCode=1\nauthor=RouteTechnologies\ndescription=Command line tools for RouteVPN\nminMagisk=1500\n' > /data/adb/modules/amneziawg/module.prop; ");
         script.append("touch /data/adb/modules/amneziawg/auto_mount; ");
         for (final String name : EXECUTABLES) {
             final File destination = new File("/data/adb/modules/amneziawg" + INSTALL_DIR, name);
