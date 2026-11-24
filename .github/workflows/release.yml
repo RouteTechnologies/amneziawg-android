@@ -139,11 +139,33 @@ jobs:
         (cd "${OUT}" && sha256sum *.apk > SHA256SUMS.txt && cat SHA256SUMS.txt)
         echo "dir=${OUT}" >> "$GITHUB_OUTPUT"
 
-    - name: Publish GitHub Release
+    # Release notes must appear once. If a release for this tag already exists (for example
+    # one created in the GitHub UI, which has its own generated notes), do not generate again.
+    - name: Check for an existing release
+      id: existing
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        set -euo pipefail
+        code="$(curl -sS -o /dev/null -w '%{http_code}' \
+          -H "Authorization: Bearer ${GH_TOKEN}" \
+          -H "Accept: application/vnd.github+json" \
+          "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/releases/tags/${GITHUB_REF_NAME}" || echo 000)"
+        echo "Release lookup for ${GITHUB_REF_NAME}: HTTP ${code}"
+        if [[ "${code}" == "200" ]]; then
+          echo "exists=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "exists=false" >> "$GITHUB_OUTPUT"
+        fi
+
+    # Always a draft: review the APKs, then publish it by hand in the GitHub UI.
+    - name: Publish GitHub Release (draft)
       uses: softprops/action-gh-release@v2
       with:
         name: RouteVPN ${{ env.VERSION }}
-        generate_release_notes: true
+        draft: true
+        generate_release_notes: ${{ steps.existing.outputs.exists != 'true' }}
         fail_on_unmatched_files: true
         files: |
           ${{ steps.sign.outputs.dir }}/*.apk
