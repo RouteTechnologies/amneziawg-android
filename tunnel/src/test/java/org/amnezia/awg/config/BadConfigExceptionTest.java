@@ -24,8 +24,10 @@ import static org.junit.Assert.fail;
 public class BadConfigExceptionTest {
     private static final Map<String, InputStream> CONFIG_MAP = new HashMap<>();
     private static final String[] CONFIG_NAMES = {
+            "empty-endpoint",
             "invalid-key",
             "invalid-number",
+            "keepalive-out-of-range",
             "invalid-value",
             "missing-attribute",
             "missing-section",
@@ -168,6 +170,38 @@ public class BadConfigExceptionTest {
         } catch (final IOException e) {
             e.printStackTrace();
             fail("IOException throwing during test");
+        }
+    }
+
+    // Empty values are accepted by the line parser (AmneziaWG exports empty I2..I5), so an empty
+    // Endpoint is rejected by the endpoint parser rather than as a syntax error.
+    @Test
+    public void throws_correctly_with_empty_endpoint() {
+        try {
+            Config.parse(CONFIG_MAP.get("empty-endpoint"));
+            fail("Config parsing must fail in this test");
+        } catch (final BadConfigException e) {
+            assertEquals(Reason.INVALID_VALUE, e.getReason());
+            assertEquals(Location.ENDPOINT, e.getLocation());
+            assertEquals(Section.PEER, e.getSection());
+        } catch (final IOException e) {
+            e.printStackTrace();
+            fail("IOException thrown during test");
+        }
+    }
+
+    @Test
+    public void throws_correctly_with_keepalive_out_of_range() {
+        try {
+            Config.parse(CONFIG_MAP.get("keepalive-out-of-range"));
+            fail("Config parsing must fail in this test");
+        } catch (final BadConfigException e) {
+            assertEquals(Reason.INVALID_VALUE, e.getReason());
+            assertEquals(Location.PERSISTENT_KEEPALIVE, e.getLocation());
+            assertEquals(Section.PEER, e.getSection());
+        } catch (final IOException e) {
+            e.printStackTrace();
+            fail("IOException thrown during test");
         }
     }
 }
