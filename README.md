@@ -4,6 +4,10 @@ RouteVPN is an Android client built on the [AmneziaWG](https://amnezia.org/learn
 It is a derivative of the open-source [amnezia-vpn/amneziawg-android](https://github.com/amnezia-vpn/amneziawg-android)
 project, which itself builds on the WireGuard Android GUI. See [COPYING](COPYING) for the license.
 
+## Requirements
+
+Android 5.0 (API 21) or newer. Release APKs are built for `arm64-v8a`, `armeabi-v7a`, `x86` and `x86_64`, plus a universal APK.
+
 ## Building
 
 ```
