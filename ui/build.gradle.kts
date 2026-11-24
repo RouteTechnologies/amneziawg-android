@@ -17,7 +17,8 @@ android {
         dataBinding = true
         viewBinding = true
     }
-    namespace = pkg
+    // Source/R/BuildConfig live in org.amnezia.awg; only the installed application id is rebranded.
+    namespace = "org.amnezia.awg"
     defaultConfig {
         applicationId = pkg
         targetSdk = 36
