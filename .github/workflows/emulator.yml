@@ -1,0 +1,94 @@
+name: Emulator smoke tests
+run-name: "Emulator • API ${{ inputs.api-levels || 'default set' }}"
+
+# Runs the instrumented smoke tests (ui/src/androidTest) on Android emulators, one API level at a
+# time. Manual only: each level downloads a system image and boots an emulator (several minutes).
+# Needs /dev/kvm inside the runner container (docker run --device /dev/kvm ...).
+on:
+  workflow_dispatch:
+    inputs:
+      api-levels:
+        description: "API levels as a JSON array, e.g. [21,23,34]"
+        required: false
+        default: "[21,23,24,26,29,34]"
+
+permissions:
+  contents: read
+
+# The runner host is small and shared: never run two emulator jobs at once.
+concurrency:
+  group: emulator-tests
+  cancel-in-progress: false
+
+jobs:
+  smoke:
+    name: "API ${{ matrix.api }}"
+    runs-on: [self-hosted, docker-runner]
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        api: ${{ fromJSON(inputs.api-levels || '[21,23,24,26,29,34]') }}
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v5
+      with:
+        submodules: recursive
+
+    - name: Check hardware acceleration (KVM)
+      shell: bash
+      run: |
+        if [[ ! -e /dev/kvm ]]; then
+          echo "::error::/dev/kvm is missing inside the runner container. Start the runner container with --device /dev/kvm (and enable nested virtualization on the host VM)."
+          exit 1
+        fi
+        ls -l /dev/kvm
+        nproc
+        free -m
+
+    - name: Set up JDK
+      uses: actions/setup-java@v5
+      with:
+        distribution: temurin
+        java-version: "17"
+
+    - name: Set up Go
+      uses: actions/setup-go@v6
+      with:
+        go-version-file: tunnel/tools/libwg-go/go.mod
+        cache-dependency-path: tunnel/tools/libwg-go/go.sum
+
+    - name: Set up Gradle
+      uses: gradle/actions/setup-gradle@v5
+
+    - name: Set up Android SDK
+      uses: android-actions/setup-android@v3
+      with:
+        packages: platform-tools
+
+    - name: Instrumented smoke tests (API ${{ matrix.api }})
+      uses: reactivecircus/android-emulator-runner@v2
+      env:
+        # See ci.yml: the native build relies on automatic Go toolchain download.
+        GOTOOLCHAIN: auto
+      with:
+        api-level: ${{ matrix.api }}
+        arch: x86_64
+        target: google_apis
+        ram-size: 2048M
+        heap-size: 512M
+        cores: 2
+        disable-animations: true
+        emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
+        script: ./gradlew --no-daemon --stacktrace --max-workers=2 -Dorg.gradle.parallel=false :ui:connectedDebugAndroidTest
+
+    - name: Upload test reports
+      if: ${{ always() }}
+      uses: actions/upload-artifact@v5
+      with:
+        name: emulator-reports-api-${{ matrix.api }}
+        path: ui/build/reports/androidTests/
+        if-no-files-found: ignore
+        retention-days: 7
