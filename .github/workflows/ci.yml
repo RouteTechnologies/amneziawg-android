@@ -28,6 +28,17 @@ jobs:
       with:
         submodules: recursive
 
+    # Runner containers have different memory limits; print them so a killed Gradle daemon
+    # ("daemon disappeared unexpectedly") can be told apart from a real failure (oom_kill > 0).
+    - name: Container resources (before build)
+      shell: bash
+      run: |
+        set +e
+        echo "runner: ${RUNNER_NAME}"
+        free -m
+        for f in memory.max memory.current memory.events; do echo "-- cgroup $f"; cat "/sys/fs/cgroup/$f" 2>/dev/null; done
+        exit 0
+
     - name: Set up JDK
       uses: actions/setup-java@v5
       with:
@@ -78,3 +89,13 @@ jobs:
         path: tunnel/build/reports/tests/
         if-no-files-found: ignore
         retention-days: 7
+
+    - name: Container resources (after build)
+      if: ${{ always() }}
+      shell: bash
+      run: |
+        set +e
+        echo "runner: ${RUNNER_NAME}"
+        free -m
+        for f in memory.max memory.current memory.events; do echo "-- cgroup $f"; cat "/sys/fs/cgroup/$f" 2>/dev/null; done
+        exit 0
