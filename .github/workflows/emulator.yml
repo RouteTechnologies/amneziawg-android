@@ -48,15 +48,15 @@ jobs:
         nproc
         free -m
 
-    # The emulator needs about 2 GB on its own and Gradle needs several more. A container capped at
-    # ~1.4 GB gets its processes OOM-killed (the emulator then vanishes silently during boot).
+    # The emulator needs about 2 GB on its own and Gradle needs more. A container capped at ~1.4 GB had its
+    # processes OOM-killed (the emulator vanished silently during boot); 4 GiB worked for API 21.
     - name: Check the container memory limit
       shell: bash
       run: |
         limit="$(cat /sys/fs/cgroup/memory.max 2>/dev/null || cat /sys/fs/cgroup/memory/memory.limit_in_bytes 2>/dev/null || echo max)"
         echo "cgroup memory limit: ${limit}"
-        if [[ "${limit}" =~ ^[0-9]+$ ]] && (( limit < 5 * 1024 * 1024 * 1024 )); then
-          echo "::error::The runner container is limited to $(( limit / 1024 / 1024 )) MiB. The emulator needs at least 5 GiB (about 7 GiB recommended): raise it, e.g. docker update --memory=7g --memory-swap=10g <runner-container> (and use --shm-size=1g when recreating it)."
+        if [[ "${limit}" =~ ^[0-9]+$ ]] && (( limit < 3584 * 1024 * 1024 )); then
+          echo "::error::The runner container is limited to $(( limit / 1024 / 1024 )) MiB. The emulator job needs at least 3.5 GiB (a 4 GiB limit worked for API 21; more is safer): raise it, e.g. docker update --memory=5g --memory-swap=8g <runner-container> (and use --shm-size=1g when recreating it)."
           exit 1
         fi
 
