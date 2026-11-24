@@ -205,6 +205,8 @@ public final class Peer {
 
     @SuppressWarnings("UnusedReturnValue")
     public static final class Builder {
+        private static final int MAX_PERSISTENT_KEEPALIVE = 65535;
+
         // Defaults to an empty set.
         private final Set<InetNetwork> allowedIps = new LinkedHashSet<>();
         // Defaults to not present.
@@ -279,7 +281,7 @@ public final class Peer {
 
         public Builder setPersistentKeepalive(final int persistentKeepalive)
                 throws BadConfigException {
-            if (persistentKeepalive < 0)
+            if (persistentKeepalive < 0 || persistentKeepalive > MAX_PERSISTENT_KEEPALIVE)
                 throw new BadConfigException(Section.PEER, Location.PERSISTENT_KEEPALIVE,
                         Reason.INVALID_VALUE, String.valueOf(persistentKeepalive));
             return setPersistentKeepalive(String.valueOf(persistentKeepalive));
@@ -287,7 +289,8 @@ public final class Peer {
 
         /**
          * Sets the persistent keepalive from a string. Empty or {@code "off"} disables it
-         * (WireGuard compatibility); otherwise the trimmed value is stored as-is.
+         * (WireGuard compatibility); otherwise the value must be an integer between 0 and
+         * {@value #MAX_PERSISTENT_KEEPALIVE} and the trimmed text is stored.
          */
         public Builder setPersistentKeepalive(final String persistentKeepalive)
                 throws BadConfigException {
@@ -295,6 +298,16 @@ public final class Peer {
             if (trimmed.isEmpty() || trimmed.equalsIgnoreCase("off")) {
                 this.persistentKeepalive = Optional.empty();
             } else {
+                final int value;
+                try {
+                    value = Integer.parseInt(trimmed);
+                } catch (final NumberFormatException e) {
+                    throw new BadConfigException(Section.PEER, Location.PERSISTENT_KEEPALIVE,
+                            trimmed, e);
+                }
+                if (value < 0 || value > MAX_PERSISTENT_KEEPALIVE)
+                    throw new BadConfigException(Section.PEER, Location.PERSISTENT_KEEPALIVE,
+                            Reason.INVALID_VALUE, trimmed);
                 this.persistentKeepalive = Optional.of(trimmed);
             }
             return this;
