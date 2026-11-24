@@ -112,6 +112,19 @@ jobs:
           fi
         done
 
+    - name: Resource diagnostics (before emulator)
+      shell: bash
+      run: |
+        set +e
+        echo "== memory =="; free -m
+        echo "== /dev/shm =="; df -h /dev/shm
+        echo "== container cgroup (memory.events oom_kill > 0 means the kernel killed a process) =="
+        for f in memory.max memory.current memory.events; do echo "-- $f"; cat "/sys/fs/cgroup/$f" 2>/dev/null; done
+        echo "== largest processes =="; ps -eo pid,rss,comm --sort=-rss | head -n 8
+        echo "== emulator crash data =="; ls -la /tmp/android-unknown 2>/dev/null
+        echo "== kernel log (best effort) =="; dmesg 2>/dev/null | tail -n 25
+        exit 0
+
     - name: Instrumented smoke tests (API ${{ matrix.api }})
       uses: reactivecircus/android-emulator-runner@v2
       env:
@@ -125,9 +138,23 @@ jobs:
         heap-size: 512M
         cores: 2
         disable-animations: true
-        emulator-boot-timeout: 420
-        emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
+        emulator-boot-timeout: 300
+        emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none -no-snapshot -no-metrics -show-kernel
         script: ./gradlew --no-daemon --stacktrace --max-workers=2 -Dorg.gradle.parallel=false :ui:connectedDebugAndroidTest
+
+    - name: Resource diagnostics (after emulator)
+      if: ${{ always() }}
+      shell: bash
+      run: |
+        set +e
+        echo "== memory =="; free -m
+        echo "== /dev/shm =="; df -h /dev/shm
+        echo "== container cgroup (memory.events oom_kill > 0 means the kernel killed a process) =="
+        for f in memory.max memory.current memory.events; do echo "-- $f"; cat "/sys/fs/cgroup/$f" 2>/dev/null; done
+        echo "== largest processes =="; ps -eo pid,rss,comm --sort=-rss | head -n 8
+        echo "== emulator crash data =="; ls -la /tmp/android-unknown 2>/dev/null
+        echo "== kernel log (best effort) =="; dmesg 2>/dev/null | tail -n 25
+        exit 0
 
     - name: Upload test reports
       if: ${{ always() }}
