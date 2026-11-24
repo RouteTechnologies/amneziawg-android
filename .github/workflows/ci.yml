@@ -51,6 +51,10 @@ jobs:
 
     # Fewer parallel tasks keeps peak memory down on the shared runner container.
     - name: Unit tests and debug APK
+      # The native build fetches Go 1.24.2 itself while go.mod requires >= 1.25, which relies on
+      # automatic toolchain download. setup-go v6 exports GOTOOLCHAIN=local, so restore the default.
+      env:
+        GOTOOLCHAIN: auto
       shell: bash
       run: |
         set -euo pipefail

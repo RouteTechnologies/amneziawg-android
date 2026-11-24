@@ -84,6 +84,10 @@ jobs:
 
     # -PamneziawgSplitAbi enables per-ABI APKs plus a universal APK (see ui/build.gradle.kts).
     - name: Build release APKs
+      # The native build fetches Go 1.24.2 itself while go.mod requires >= 1.25, which relies on
+      # automatic toolchain download. setup-go v6 exports GOTOOLCHAIN=local, so restore the default.
+      env:
+        GOTOOLCHAIN: auto
       shell: bash
       run: |
         set -euo pipefail

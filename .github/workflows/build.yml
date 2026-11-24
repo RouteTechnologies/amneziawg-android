@@ -92,6 +92,10 @@ jobs:
         echo "KEYSTORE_PATH=${PWD}/release.keystore.jks" >> "$GITHUB_ENV"
 
     - name: Build
+      # The native build fetches Go 1.24.2 itself while go.mod requires >= 1.25, which relies on
+      # automatic toolchain download. setup-go v6 exports GOTOOLCHAIN=local, so restore the default.
+      env:
+        GOTOOLCHAIN: auto
       shell: bash
       run: |
         set -euo pipefail
