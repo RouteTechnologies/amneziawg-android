@@ -48,6 +48,18 @@ jobs:
         nproc
         free -m
 
+    # The emulator needs about 2 GB on its own and Gradle needs more. A container capped at ~1.4 GB had its
+    # processes OOM-killed (the emulator vanished silently during boot); 4 GiB worked for API 21.
+    - name: Check the container memory limit
+      shell: bash
+      run: |
+        limit="$(cat /sys/fs/cgroup/memory.max 2>/dev/null || cat /sys/fs/cgroup/memory/memory.limit_in_bytes 2>/dev/null || echo max)"
+        echo "cgroup memory limit: ${limit}"
+        if [[ "${limit}" =~ ^[0-9]+$ ]] && (( limit < 3584 * 1024 * 1024 )); then
+          echo "::error::The runner container is limited to $(( limit / 1024 / 1024 )) MiB. The emulator job needs at least 3.5 GiB (a 4 GiB limit worked for API 21; more is safer): raise it, e.g. docker update --memory=5g --memory-swap=8g <runner-container> (and use --shm-size=1g when recreating it)."
+          exit 1
+        fi
+
     - name: Set up JDK
       uses: actions/setup-java@v5
       with:
@@ -68,6 +80,63 @@ jobs:
       with:
         packages: platform-tools
 
+    # The emulator binary links against X11/GL/audio libraries even when run with -no-window, and the
+    # runner container image does not ship them ("error while loading shared libraries: libX11.so.6").
+    # Installing them here is idempotent; the long-term fix is to bake them into the runner image.
+    - name: Install emulator system libraries
+      shell: bash
+      run: |
+        set -euo pipefail
+        export DEBIAN_FRONTEND=noninteractive
+        SUDO=""; if [[ "$(id -u)" != "0" ]]; then SUDO="sudo"; fi
+        ${SUDO} apt-get update -qq
+        for pkg in libx11-6 libx11-xcb1 libxcb1 libxext6 libxrender1 libxtst6 libxi6 libxfixes3 \
+                   libxcomposite1 libxcursor1 libxdamage1 libxrandr2 libxkbcommon0 libxkbfile1 \
+                   libxshmfence1 libnss3 libnspr4 libpulse0 libgl1 libglu1-mesa libdbus-1-3 \
+                   libfontconfig1 libfreetype6 libgbm1 libxcb-xinerama0 libxcb-icccm4 libxcb-image0 \
+                   libxcb-keysyms1 libxcb-render-util0 libxcb-shape0 libxcb-xkb1 libxkbcommon-x11-0; do
+          ${SUDO} apt-get install -y --no-install-recommends "${pkg}" >/dev/null \
+            || echo "::warning::could not install ${pkg}"
+        done
+        # libasound2 was renamed to libasound2t64 on newer Ubuntu releases.
+        ${SUDO} apt-get install -y --no-install-recommends libasound2t64 >/dev/null 2>&1 \
+          || ${SUDO} apt-get install -y --no-install-recommends libasound2 >/dev/null \
+          || echo "::warning::could not install libasound2"
+
+    # Fail within seconds instead of waiting for the emulator boot timeout when libraries are missing.
+    - name: Check the emulator starts
+      shell: bash
+      run: |
+        set -euo pipefail
+        sdkmanager --install emulator --channel=0 >/dev/null
+        EMU="${ANDROID_HOME}/emulator"
+        if ! "${EMU}/emulator" -version | head -n 3; then
+          echo "::error::The emulator binary does not start (missing shared libraries?)"
+          exit 1
+        fi
+        export LD_LIBRARY_PATH="${EMU}/lib64:${EMU}/lib64/qt/lib:${EMU}/lib64/gles_swiftshader"
+        for bin in "${EMU}"/qemu/linux-x86_64/qemu-system-x86_64*; do
+          [[ -f "${bin}" ]] || continue
+          missing="$(ldd "${bin}" 2>/dev/null | grep 'not found' || true)"
+          if [[ -n "${missing}" ]]; then
+            echo "::warning::${bin##*/} is missing libraries:"
+            echo "${missing}"
+          fi
+        done
+
+    - name: Resource diagnostics (before emulator)
+      shell: bash
+      run: |
+        set +e
+        echo "== memory =="; free -m
+        echo "== /dev/shm =="; df -h /dev/shm
+        echo "== container cgroup (memory.events oom_kill > 0 means the kernel killed a process) =="
+        for f in memory.max memory.current memory.events; do echo "-- $f"; cat "/sys/fs/cgroup/$f" 2>/dev/null; done
+        echo "== largest processes =="; ps -eo pid,rss,comm --sort=-rss | head -n 8
+        echo "== emulator crash data =="; ls -la /tmp/android-unknown 2>/dev/null
+        echo "== kernel log (best effort) =="; dmesg 2>/dev/null | tail -n 25
+        exit 0
+
     - name: Instrumented smoke tests (API ${{ matrix.api }})
       uses: reactivecircus/android-emulator-runner@v2
       env:
@@ -81,8 +150,23 @@ jobs:
         heap-size: 512M
         cores: 2
         disable-animations: true
-        emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
+        emulator-boot-timeout: 300
+        emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none -no-snapshot -no-metrics -show-kernel
         script: ./gradlew --no-daemon --stacktrace --max-workers=2 -Dorg.gradle.parallel=false :ui:connectedDebugAndroidTest
+
+    - name: Resource diagnostics (after emulator)
+      if: ${{ always() }}
+      shell: bash
+      run: |
+        set +e
+        echo "== memory =="; free -m
+        echo "== /dev/shm =="; df -h /dev/shm
+        echo "== container cgroup (memory.events oom_kill > 0 means the kernel killed a process) =="
+        for f in memory.max memory.current memory.events; do echo "-- $f"; cat "/sys/fs/cgroup/$f" 2>/dev/null; done
+        echo "== largest processes =="; ps -eo pid,rss,comm --sort=-rss | head -n 8
+        echo "== emulator crash data =="; ls -la /tmp/android-unknown 2>/dev/null
+        echo "== kernel log (best effort) =="; dmesg 2>/dev/null | tail -n 25
+        exit 0
 
     - name: Upload test reports
       if: ${{ always() }}
