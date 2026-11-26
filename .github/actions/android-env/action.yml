@@ -1,0 +1,77 @@
+name: Android build environment
+description: >-
+  JDK 17, Go (version from libwg-go/go.mod), Gradle, Android SDK and python3 for the RouteVPN
+  workflows, plus a check of the runner container's memory limit. Used by ci.yml, release.yml,
+  build.yml and emulator.yml. Run actions/checkout first.
+
+inputs:
+  sdk-packages:
+    description: Space-separated sdkmanager packages to install.
+    default: platform-tools
+  gradle-cache-read-only:
+    description: "'true' to only read the Gradle cache (pull requests, tags), 'false' to also write it."
+    default: "true"
+  min-memory-mib:
+    description: Fail when the container's cgroup memory limit is below this many MiB (0 disables the check).
+    default: "0"
+
+runs:
+  using: composite
+  steps:
+    # Runner containers have different memory limits (about 808 MiB, 1.35 GiB and 3.95 GiB were
+    # observed). Below about 1.4 GiB the kernel OOM-kills Gradle ("daemon disappeared"); fail early
+    # with a clear message instead of after a long build. See docs/ci-cd/self-hosted-runner.md.
+    - name: Check runner resources
+      shell: bash
+      env:
+        MIN_MIB: ${{ inputs.min-memory-mib }}
+      run: |
+        set -euo pipefail
+        limit="$(cat /sys/fs/cgroup/memory.max 2>/dev/null || cat /sys/fs/cgroup/memory/memory.limit_in_bytes 2>/dev/null || echo max)"
+        echo "runner: ${RUNNER_NAME}, cgroup memory limit: ${limit}"
+        free -m || true
+        if [[ "${limit}" =~ ^[0-9]+$ ]] && (( MIN_MIB > 0 )) && (( limit < MIN_MIB * 1024 * 1024 )); then
+          echo "::error::Runner container ${RUNNER_NAME} is limited to $(( limit / 1024 / 1024 )) MiB; this job needs at least ${MIN_MIB} MiB. Raise the container memory limit (docker update --memory=4g --memory-swap=8g <container>) or re-run on another runner."
+          exit 1
+        fi
+
+    - name: Ensure python3
+      shell: bash
+      run: |
+        set -euo pipefail
+        if ! command -v python3 >/dev/null; then
+          SUDO=""; if [[ "$(id -u)" != "0" ]]; then SUDO="sudo"; fi
+          ${SUDO} apt-get update -qq
+          ${SUDO} apt-get install -y --no-install-recommends python3 >/dev/null
+        fi
+        python3 --version
+
+    - name: Set up JDK
+      uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
+      with:
+        distribution: temurin
+        java-version: "17"
+
+    # libwg-go (amneziawg-go) is built with Go during the NDK/CMake step.
+    - name: Set up Go
+      uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+      with:
+        go-version-file: tunnel/tools/libwg-go/go.mod
+        cache-dependency-path: tunnel/tools/libwg-go/go.sum
+
+    # The native build fetches Go 1.24.2 itself while go.mod requires >= 1.25, which relies on
+    # automatic toolchain download; setup-go v6 exports GOTOOLCHAIN=local, so restore the default
+    # for all later steps of the job.
+    - name: Allow Go toolchain download
+      shell: bash
+      run: echo "GOTOOLCHAIN=auto" >> "$GITHUB_ENV"
+
+    - name: Set up Gradle
+      uses: gradle/actions/setup-gradle@0723195856401067f7a2779048b490ace7a47d7c # v5
+      with:
+        cache-read-only: ${{ inputs.gradle-cache-read-only }}
+
+    - name: Set up Android SDK
+      uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3
+      with:
+        packages: ${{ inputs.sdk-packages }}

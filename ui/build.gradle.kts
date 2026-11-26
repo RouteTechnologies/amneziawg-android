@@ -1,5 +1,6 @@
 @file:Suppress("UnstableApiUsage")
 
+import org.gradle.api.artifacts.component.ModuleComponentIdentifier
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 import org.jetbrains.kotlin.gradle.tasks.KotlinCompile
 
@@ -103,4 +104,27 @@ tasks.withType<JavaCompile>().configureEach {
 
 tasks.withType<KotlinCompile>().configureEach {
     compilerOptions.jvmTarget.set(JvmTarget.JVM_17)
+}
+
+// Writes the resolved third-party components that end up in the release app (runtime classpath
+// plus the desugared JDK library), one group:module:version per line. Used by the release SBOM
+// (scripts/ci/release_tool.py sbom); relies only on Gradle's dependency resolution.
+val writeReleaseDependencies by tasks.registering {
+    description = "Lists resolved release dependencies for the SBOM."
+    val outputFile = layout.buildDirectory.file("sbom/release-dependencies.txt")
+    outputs.file(outputFile)
+    outputs.upToDateWhen { false }
+    doLast {
+        val coordinates = listOf("releaseRuntimeClasspath", "coreLibraryDesugaring")
+            .flatMap { name -> configurations.getByName(name).incoming.resolutionResult.allComponents }
+            .mapNotNull { it.id as? ModuleComponentIdentifier }
+            .map { "${it.group}:${it.module}:${it.version}" }
+            .distinct()
+            .sorted()
+        check(coordinates.isNotEmpty()) { "no release dependencies resolved" }
+        outputFile.get().asFile.apply {
+            parentFile.mkdirs()
+            writeText(coordinates.joinToString(separator = "\n", postfix = "\n"))
+        }
+    }
 }

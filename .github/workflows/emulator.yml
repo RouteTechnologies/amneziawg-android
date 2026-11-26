@@ -33,9 +33,10 @@ jobs:
 
     steps:
     - name: Checkout
-      uses: actions/checkout@v5
+      uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
       with:
         submodules: recursive
+        persist-credentials: false
 
     - name: Check hardware acceleration (KVM)
       shell: bash
@@ -49,36 +50,12 @@ jobs:
         free -m
 
     # The emulator needs about 2 GB on its own and Gradle needs more. A container capped at ~1.4 GB had its
-    # processes OOM-killed (the emulator vanished silently during boot); 4 GiB worked for API 21.
-    - name: Check the container memory limit
-      shell: bash
-      run: |
-        limit="$(cat /sys/fs/cgroup/memory.max 2>/dev/null || cat /sys/fs/cgroup/memory/memory.limit_in_bytes 2>/dev/null || echo max)"
-        echo "cgroup memory limit: ${limit}"
-        if [[ "${limit}" =~ ^[0-9]+$ ]] && (( limit < 3584 * 1024 * 1024 )); then
-          echo "::error::The runner container is limited to $(( limit / 1024 / 1024 )) MiB. The emulator job needs at least 3.5 GiB (a 4 GiB limit worked for API 21; more is safer): raise it, e.g. docker update --memory=5g --memory-swap=8g <runner-container> (and use --shm-size=1g when recreating it)."
-          exit 1
-        fi
-
-    - name: Set up JDK
-      uses: actions/setup-java@v5
+    # processes OOM-killed (the emulator vanished silently during boot); 4 GiB worked for API 21-34.
+    - name: Set up build environment
+      uses: ./.github/actions/android-env
       with:
-        distribution: temurin
-        java-version: "17"
-
-    - name: Set up Go
-      uses: actions/setup-go@v6
-      with:
-        go-version-file: tunnel/tools/libwg-go/go.mod
-        cache-dependency-path: tunnel/tools/libwg-go/go.sum
-
-    - name: Set up Gradle
-      uses: gradle/actions/setup-gradle@v5
-
-    - name: Set up Android SDK
-      uses: android-actions/setup-android@v3
-      with:
-        packages: platform-tools
+        gradle-cache-read-only: "true"
+        min-memory-mib: "3584"
 
     # The emulator binary links against X11/GL/audio libraries even when run with -no-window, and the
     # runner container image does not ship them ("error while loading shared libraries: libX11.so.6").
@@ -138,10 +115,7 @@ jobs:
         exit 0
 
     - name: Instrumented smoke tests (API ${{ matrix.api }})
-      uses: reactivecircus/android-emulator-runner@v2
-      env:
-        # See ci.yml: the native build relies on automatic Go toolchain download.
-        GOTOOLCHAIN: auto
+      uses: reactivecircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d # v2
       with:
         api-level: ${{ matrix.api }}
         arch: x86_64
@@ -170,7 +144,7 @@ jobs:
 
     - name: Upload test reports
       if: ${{ always() }}
-      uses: actions/upload-artifact@v5
+      uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
       with:
         name: emulator-reports-api-${{ matrix.api }}
         path: ui/build/reports/androidTests/
