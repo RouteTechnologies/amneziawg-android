@@ -39,6 +39,10 @@ and `memory.events` (`oom_kill > 0` means the kernel killed a process).
   seen on containers with the same name. Jobs on the small containers failed with "Gradle build
   daemon disappeared unexpectedly" and `oom_kill 1`. Give every runner container a fixed limit and
   make sure the host has enough memory for all runners at once (the host has 11.8 GiB).
+* **Disk full**: a screenshots run failed with `Free space left: 0 MB` right after the system image
+  download and `Your device does not have enough disk space to run avd`. `emulator.yml` now removes
+  unused system images and fails early with the free space; the real fix is freeing disk on the host
+  (`docker system prune`, old runner work directories, stale volumes).
 * `/dev/shm` is 64 MB. It did not cause failures, but `--shm-size=1g` is safer for the emulator.
 * The image lacks the emulator's X11/GL/audio libraries; `emulator.yml` installs them each run.
   Baking them into the image (see the package list in `emulator.yml`) saves about a minute per job.

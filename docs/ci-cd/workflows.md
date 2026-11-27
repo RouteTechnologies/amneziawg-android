@@ -42,7 +42,9 @@ Inputs: `api-levels` (a JSON array) and `mode` (`tests`, `screenshots` or `both`
 (start page, add-tunnel sheet, tunnel editor) as the artifact `screenshots-api-<N>`. Jobs run one at
 a time (`max-parallel: 1`, `concurrency`), need `/dev/kvm` and at least 3 GiB of container memory
 (4 GiB is recommended; 3.95 GiB is the largest limit tested with the smoke tests), and install the
-emulator's X11/GL libraries with `apt-get` ([self-hosted-runner.md](self-hosted-runner.md)).
+emulator's X11/GL libraries with `apt-get` ([self-hosted-runner.md](self-hosted-runner.md)). Before the
+emulator starts they delete the system images of other API levels and fail early when less than
+6 GiB of disk is free; the AVD is removed afterwards.
 
 ## play-publish.yml
 

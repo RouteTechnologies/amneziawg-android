@@ -19,6 +19,7 @@
 | `The runner has received a shutdown signal` | Runner container restarted during the job | Re-run the job |
 | Emulator: `libX11.so.6: cannot open shared object file` | Image lacks emulator libraries | Installed by `emulator.yml`; check that `apt-get` works |
 | Emulator: `/dev/kvm is missing` | Container started without `--device /dev/kvm` | Recreate the runner container with it |
+| Emulator: `Your device does not have enough disk space to run avd` / `Free space left: 0 MB` / `Only N MiB ... are free` | Runner disk full | Free disk on the runner host (`df -h`, `docker system prune`, old work directories) |
 | Emulator disappears during boot, `oom_kill` > 0 | Memory below ~3 GiB (or too little headroom: 4 GiB is recommended) | Raise the container limit |
 | Play: `no published GitHub Release for vX` | Release still a draft | Publish it first |
 | Play: `versionCode N is not higher than M already on Google Play` | Version already uploaded | Release a new version |
