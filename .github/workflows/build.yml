@@ -1,6 +1,9 @@
-name: Android build (signed AAB / debug APK)
-run-name: "Android • ${{ inputs.target }} • ${{ inputs.ref || github.ref_name }}"
+name: Manual build (unsigned validation)
+run-name: "Manual build • ${{ inputs.target }} • ${{ inputs.ref || github.ref_name }}"
 
+# Manual builds of any ref for testing. Uses no secrets and never signs: release outputs are
+# labelled UNSIGNED and are not installable as updates. Signed APKs and the signed AAB come only
+# from release.yml (version tags). See docs/ci-cd/workflows.md.
 on:
   workflow_dispatch:
     inputs:
@@ -8,149 +11,100 @@ on:
         description: "What to build"
         type: choice
         required: true
-        default: release_aab
+        default: release_unsigned
         options:
-        - release_aab
+        - release_unsigned
         - debug_apk
       ref:
         description: "Git ref (branch/tag/sha)"
         required: false
         default: "master"
+      lint:
+        description: "Also run Android lint (slow, memory hungry)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
 
 jobs:
   build:
     name: "Build (${{ inputs.target }})"
     runs-on: [self-hosted, docker-runner]
+    timeout-minutes: 90
 
     steps:
     - name: Checkout
-      uses: actions/checkout@v5
+      uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
       with:
         ref: ${{ inputs.ref }}
         submodules: recursive
-        fetch-depth: 0
+        persist-credentials: false
 
-    - name: Set up JDK
-      uses: actions/setup-java@v5
+    - name: Set up build environment
+      uses: ./.github/actions/android-env
       with:
-        distribution: temurin
-        java-version: "17"
-
-    # libwg-go (amneziawg-go) is built with Go during the NDK/CMake step.
-    - name: Set up Go
-      uses: actions/setup-go@v6
-      with:
-        go-version-file: tunnel/tools/libwg-go/go.mod
-        cache-dependency-path: tunnel/tools/libwg-go/go.sum
-
-    - name: Set up Gradle
-      uses: gradle/actions/setup-gradle@v5
-
-    - name: Set up Android SDK
-      uses: android-actions/setup-android@v3
-      with:
-        # The legacy "tools" package (part of the action's default) was removed
-        # from Google's SDK repository; AGP downloads whatever else it needs.
-        packages: platform-tools
-
-    - name: Configure build
-      id: cfg
-      shell: bash
-      run: |
-        set -euo pipefail
-        case "${{ inputs.target }}" in
-          release_aab)
-            echo "gradle_task=bundleRelease" >> "$GITHUB_OUTPUT"
-            echo "kind=aab" >> "$GITHUB_OUTPUT"
-            echo "artifact_name=release-aab" >> "$GITHUB_OUTPUT"
-            echo "needs_signing=true" >> "$GITHUB_OUTPUT"
-            ;;
-          debug_apk)
-            echo "gradle_task=assembleDebug" >> "$GITHUB_OUTPUT"
-            echo "kind=apk" >> "$GITHUB_OUTPUT"
-            echo "artifact_name=debug-apk" >> "$GITHUB_OUTPUT"
-            echo "needs_signing=false" >> "$GITHUB_OUTPUT"
-            ;;
-          *)
-            echo "Unknown target: ${{ inputs.target }}" >&2
-            exit 1
-            ;;
-        esac
-
-    - name: Decode keystore from secret
-      if: ${{ steps.cfg.outputs.needs_signing == 'true' }}
-      shell: bash
-      env:
-        KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
-      run: |
-        set -euo pipefail
-        if [[ -z "${KEYSTORE_B64}" ]]; then
-          echo "Missing secret ANDROID_KEYSTORE_BASE64" >&2
-          exit 1
-        fi
-        echo "${KEYSTORE_B64}" | base64 --decode > release.keystore.jks
-        echo "KEYSTORE_PATH=${PWD}/release.keystore.jks" >> "$GITHUB_ENV"
+        gradle-cache-read-only: "true"
+        min-memory-mib: "1200"
 
     - name: Build
-      # The native build fetches Go 1.24.2 itself while go.mod requires >= 1.25, which relies on
-      # automatic toolchain download. setup-go v6 exports GOTOOLCHAIN=local, so restore the default.
-      env:
-        GOTOOLCHAIN: auto
       shell: bash
+      env:
+        TARGET: ${{ inputs.target }}
+        LINT: ${{ inputs.lint }}
       run: |
         set -euo pipefail
         chmod +x ./gradlew
-        ./gradlew --no-daemon --stacktrace ${{ steps.cfg.outputs.gradle_task }}
+        flags=(--no-daemon --stacktrace --max-workers=2 -Dorg.gradle.parallel=false)
+        lint_task=()
+        case "${TARGET}" in
+          debug_apk)
+            [[ "${LINT}" == true ]] && lint_task=(:ui:lintDebug)
+            ./gradlew "${flags[@]}" :ui:assembleDebug "${lint_task[@]}"
+            ;;
+          release_unsigned)
+            [[ "${LINT}" == true ]] && lint_task=(:ui:lintRelease)
+            ./gradlew "${flags[@]}" :ui:bundleRelease "${lint_task[@]}"
+            ./gradlew "${flags[@]}" -PamneziawgSplitAbi=true :ui:assembleRelease
+            ;;
+          *) echo "::error::unknown target ${TARGET}"; exit 1 ;;
+        esac
 
-    - name: Locate built artifact
-      id: locate
-      shell: bash
-      run: |
-        set -euo pipefail
-        
-        if [[ "${{ steps.cfg.outputs.kind }}" == "aab" ]]; then
-          FILE="./ui/build/outputs/bundle/release/ui-release.aab"
-        else
-          FILE="./ui/build/outputs/apk/debug/ui-debug.apk"
-        fi
-        
-        if [[ -z "${FILE}" ]]; then
-          echo "Built file not found" >&2
-          exit 1
-        fi
-        
-        echo "built_file=${FILE}" >> "$GITHUB_OUTPUT"
-
-    - name: Sign AAB
-      if: ${{ steps.cfg.outputs.needs_signing == 'true' }}
-      id: sign
+    - name: Collect outputs
       shell: bash
       env:
-        KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
-        KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+        TARGET: ${{ inputs.target }}
       run: |
         set -euo pipefail
-        
-        AAB="${{ steps.locate.outputs.built_file }}"
-        SIGNED_AAB="${AAB%.aab}-signed.aab"
-        
-        if [[ -z "${KEYSTORE_PASSWORD}" || -z "${KEY_ALIAS}" ]]; then
-          echo "Missing one of secrets: ANDROID_KEYSTORE_PASSWORD / ANDROID_KEY_ALIAS" >&2
-          exit 1
+        out="${RUNNER_TEMP}/manual-build"
+        rm -rf "${out}" && mkdir -p "${out}"
+        version="$(sed -n 's/^amneziawgVersionName=//p' gradle.properties)"
+        if [[ "${TARGET}" == debug_apk ]]; then
+          cp ui/build/outputs/apk/debug/*.apk "${out}/"
+        else
+          for apk in ui/build/outputs/apk/release/ui-*-release-unsigned.apk; do
+            abi="$(basename "${apk}" -release-unsigned.apk)"; abi="${abi#ui-}"
+            cp "${apk}" "${out}/routevpn-${version}-${abi}-UNSIGNED.apk"
+          done
+          cp ui/build/outputs/bundle/release/ui-release.aab "${out}/routevpn-${version}-release-UNSIGNED.aab"
+          echo "::warning::These release outputs are UNSIGNED validation builds. Do not distribute them."
         fi
-        
-        jarsigner \
-          -keystore "${KEYSTORE_PATH}" \
-          -storepass "${KEYSTORE_PASSWORD}" \
-          -signedjar "${SIGNED_AAB}" \
-          "${AAB}" \
-          "${KEY_ALIAS}"
-        
-        echo "final_file=${SIGNED_AAB}" >> "$GITHUB_OUTPUT"
+        (cd "${out}" && sha256sum * > SHA256SUMS.txt && cat SHA256SUMS.txt)
+        echo "OUT=${out}" >> "$GITHUB_ENV"
 
-    - name: Upload artifact
-      uses: actions/upload-artifact@v5
+    - name: Upload outputs
+      uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
       with:
-        name: ${{ steps.cfg.outputs.artifact_name }}
-        path: ${{ steps.sign.outputs.final_file || steps.locate.outputs.built_file }}
+        name: ${{ inputs.target == 'debug_apk' && 'debug-apk' || 'unsigned-validation-build' }}
+        path: ${{ env.OUT }}
         if-no-files-found: error
+        retention-days: 7
+
+    - name: Upload lint reports
+      if: ${{ always() && inputs.lint }}
+      uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+      with:
+        name: lint-reports
+        path: ui/build/reports/lint-results-*.*
+        if-no-files-found: ignore
+        retention-days: 7

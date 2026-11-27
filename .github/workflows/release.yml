@@ -1,15 +1,16 @@
-name: Release (signed APKs)
+name: Release
 run-name: "Release • ${{ github.ref_name }}"
 
-# Push a tag such as v3.1.4 to build signed APKs (universal + one per ABI)
-# and attach them to a GitHub Release.
+# Push a version tag (e.g. v1.0.4) to build, sign, verify and publish a draft GitHub Release with
+# per-ABI + universal APKs, a signed AAB, checksums, an SBOM, release metadata and build provenance.
+# The tag must equal amneziawgVersionName in gradle.properties. Google Play publishing is a separate,
+# manual workflow (play-publish.yml) and never runs from a tag. See docs/ci-cd/release-process.md.
 on:
   push:
     tags:
     - "v*"
 
-permissions:
-  contents: write
+permissions: {}
 
 concurrency:
   group: release-${{ github.ref }}
@@ -17,166 +18,390 @@ concurrency:
 
 jobs:
   release:
-    name: "Build & publish ${{ github.ref_name }}"
+    name: "Build, sign & publish ${{ github.ref_name }}"
     runs-on: [self-hosted, docker-runner]
-    timeout-minutes: 90
+    timeout-minutes: 120
+    # Lets the signing secrets be scoped to this environment (and to v* tags); see
+    # docs/ci-cd/secrets-and-permissions.md. Repository-level secrets keep working.
+    environment: github-release
+    permissions:
+      contents: write      # create the draft release and upload its assets
+      id-token: write      # sign the build provenance (Sigstore)
+      attestations: write  # store the build provenance attestation
 
     env:
       BUILD_TOOLS_VERSION: "36.0.0"
+      ABIS: "arm64-v8a armeabi-v7a x86 x86_64"
 
     steps:
     - name: Checkout
-      uses: actions/checkout@v5
+      uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
       with:
         submodules: recursive
-        fetch-depth: 0
+        fetch-depth: 0          # all tags: needed for the versionCode check
+        persist-credentials: false
 
-    # The tag is the source of truth for versionName (e.g. v3.1.5 -> 3.1.5).
-    # versionCode still comes from gradle.properties and must be bumped per release.
-    - name: Derive version from tag
+    # The runner keeps its temp directory between jobs: start from a clean, private one.
+    - name: Prepare work directories
       shell: bash
       run: |
         set -euo pipefail
-        VERSION="${GITHUB_REF_NAME#v}"
-        if [[ ! "${VERSION}" =~ ^[0-9]+(\.[0-9]+)*([-+][0-9A-Za-z.-]+)?$ ]]; then
-          echo "Tag '${GITHUB_REF_NAME}' is not a version like v1.2.3" >&2
-          exit 1
-        fi
-        echo "VERSION=${VERSION}" >> "$GITHUB_ENV"
-        echo "Building versionName=${VERSION}, versionCode=$(sed -n 's/^amneziawgVersionCode=//p' gradle.properties)"
+        umask 077
+        rm -rf "${RUNNER_TEMP}/dist" "${RUNNER_TEMP}/keys"
+        mkdir -p "${RUNNER_TEMP}/dist/upload" "${RUNNER_TEMP}/keys"
+        echo "DIST=${RUNNER_TEMP}/dist" >> "$GITHUB_ENV"
+        echo "KEYS=${RUNNER_TEMP}/keys" >> "$GITHUB_ENV"
 
-    - name: Set up JDK
-      uses: actions/setup-java@v5
+    - name: Set up build environment
+      uses: ./.github/actions/android-env
       with:
-        distribution: temurin
-        java-version: "17"
+        sdk-packages: "platform-tools build-tools;36.0.0"
+        gradle-cache-read-only: "true"
+        min-memory-mib: "1200"
 
-    # libwg-go (amneziawg-go) is built with Go during the NDK/CMake step.
-    - name: Set up Go
-      uses: actions/setup-go@v6
-      with:
-        go-version-file: tunnel/tools/libwg-go/go.mod
-        cache-dependency-path: tunnel/tools/libwg-go/go.sum
-
-    - name: Set up Gradle
-      uses: gradle/actions/setup-gradle@v5
-
-    - name: Set up Android SDK
-      uses: android-actions/setup-android@v3
-      with:
-        # build-tools provides zipalign + apksigner; AGP fetches the NDK/CMake it needs.
-        packages: "platform-tools build-tools;${{ env.BUILD_TOOLS_VERSION }}"
-
-    - name: Decode keystore
+    - name: Validate tag, version and changelog
+      id: version
       shell: bash
-      env:
-        KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
       run: |
         set -euo pipefail
-        if [[ -z "${KEYSTORE_B64}" ]]; then
-          echo "Missing secret ANDROID_KEYSTORE_BASE64" >&2
-          exit 1
-        fi
-        KEYSTORE="${RUNNER_TEMP}/release.keystore.jks"
-        echo "${KEYSTORE_B64}" | base64 --decode > "${KEYSTORE}"
-        chmod 600 "${KEYSTORE}"
-        echo "KEYSTORE_PATH=${KEYSTORE}" >> "$GITHUB_ENV"
+        result="$(python3 scripts/ci/release_tool.py check-version --tag "${GITHUB_REF_NAME}")"
+        echo "${result}"
+        echo "${result}" >> "$GITHUB_OUTPUT"
+        version="$(sed -n 's/^version=//p' <<<"${result}")"
+        python3 scripts/ci/release_tool.py changelog --version "${version}" \
+          --out "${DIST}/upload/CHANGELOG-v${version}.md"
 
-    # -PamneziawgSplitAbi enables per-ABI APKs plus a universal APK (see ui/build.gradle.kts).
-    - name: Build release APKs
-      # The native build fetches Go 1.24.2 itself while go.mod requires >= 1.25, which relies on
-      # automatic toolchain download. setup-go v6 exports GOTOOLCHAIN=local, so restore the default.
-      env:
-        GOTOOLCHAIN: auto
+    # No secrets are available to this step: the keystores are decoded only after the build.
+    - name: Build AAB and APKs (unsigned)
       shell: bash
       run: |
         set -euo pipefail
         chmod +x ./gradlew
-        ./gradlew --no-daemon --stacktrace -PamneziawgSplitAbi=true -PamneziawgVersionName="${VERSION}" assembleRelease
+        flags=(--no-daemon --stacktrace --max-workers=2 -Dorg.gradle.parallel=false)
+        ./gradlew "${flags[@]}" :ui:bundleRelease :ui:writeReleaseDependencies
+        # -PamneziawgSplitAbi: one APK per ABI plus a universal APK (ui/build.gradle.kts). The native
+        # libraries built for the bundle are reused (up to date), so this only packages the APKs.
+        ./gradlew "${flags[@]}" -PamneziawgSplitAbi=true :ui:assembleRelease
 
-    - name: Align and sign APKs
+    - name: Verify build outputs
+      shell: bash
+      env:
+        APP_ID: ${{ steps.version.outputs.application_id }}
+        VERSION: ${{ steps.version.outputs.version }}
+        VERSION_CODE: ${{ steps.version.outputs.version_code }}
+        MIN_SDK: ${{ steps.version.outputs.min_sdk }}
+      run: |
+        set -euo pipefail
+        aapt2="${ANDROID_HOME}/build-tools/${BUILD_TOOLS_VERSION}/aapt2"
+        apk_dir=ui/build/outputs/apk/release
+        expected_count=0
+        for abi in ${ABIS} universal; do
+          apk="${apk_dir}/ui-${abi}-release-unsigned.apk"
+          [[ -f "${apk}" ]] || { echo "::error::missing ${apk}"; exit 1; }
+          expected_count=$((expected_count + 1))
+          badging="$("${aapt2}" dump badging "${apk}")"
+          grep -q "^package: name='${APP_ID}' versionCode='${VERSION_CODE}' versionName='${VERSION}'" <<<"${badging}" \
+            || { echo "::error::${apk}: package/versionCode/versionName do not match ${APP_ID} ${VERSION_CODE} ${VERSION}"; grep '^package:' <<<"${badging}"; exit 1; }
+          grep -Eq "^(sdkVersion|minSdkVersion):'${MIN_SDK}'$" <<<"${badging}" \
+            || { echo "::error::${apk}: minSdk is not ${MIN_SDK}"; exit 1; }
+          native="$(sed -n "s/^native-code: //p" <<<"${badging}" | tr -d "'" | tr ' ' '\n' | sort | xargs)"
+          if [[ "${abi}" == universal ]]; then want="$(tr ' ' '\n' <<<"${ABIS}" | sort | xargs)"; else want="${abi}"; fi
+          [[ "${native}" == "${want}" ]] || { echo "::error::${apk}: native code '${native}', expected '${want}'"; exit 1; }
+          echo "ok ${apk}: ${APP_ID} ${VERSION} (${VERSION_CODE}), minSdk ${MIN_SDK}, ${native}"
+        done
+        actual_count="$(find "${apk_dir}" -maxdepth 1 -name '*.apk' | wc -l)"
+        (( actual_count == expected_count )) || { echo "::error::expected ${expected_count} APKs in ${apk_dir}, found ${actual_count}"; ls -l "${apk_dir}"; exit 1; }
+
+        aab=ui/build/outputs/bundle/release/ui-release.aab
+        [[ -f "${aab}" ]] || { echo "::error::missing ${aab}"; exit 1; }
+        python3 - "${aab}" ${ABIS} <<'PY'
+        import sys, zipfile
+        aab, abis = sys.argv[1], sys.argv[2:]
+        names = zipfile.ZipFile(aab).namelist()
+        missing = [a for a in abis if not any(n.startswith(f"base/lib/{a}/") for n in names)]
+        if missing or "base/manifest/AndroidManifest.xml" not in names:
+            sys.exit(f"::error::{aab}: missing native libraries for {missing} or the base manifest")
+        print(f"ok {aab}: base module with native libraries for {' '.join(abis)}")
+        PY
+
+    # Keys exist on disk only during this step and are deleted when it ends (also on failure).
+    - name: Sign and verify APKs and AAB
       id: sign
       shell: bash
       env:
+        VERSION: ${{ steps.version.outputs.version }}
+        KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
         KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
         KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
         KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        UPLOAD_KEYSTORE_B64: ${{ secrets.PLAY_UPLOAD_KEYSTORE_BASE64 }}
+        UPLOAD_KEYSTORE_PASSWORD: ${{ secrets.PLAY_UPLOAD_KEYSTORE_PASSWORD }}
+        UPLOAD_KEY_ALIAS: ${{ secrets.PLAY_UPLOAD_KEY_ALIAS }}
+        UPLOAD_KEY_PASSWORD: ${{ secrets.PLAY_UPLOAD_KEY_PASSWORD }}
+        EXPECTED_APK_CERT: ${{ vars.RELEASE_CERT_SHA256 }}
+        EXPECTED_UPLOAD_CERT: ${{ vars.PLAY_UPLOAD_CERT_SHA256 }}
       run: |
         set -euo pipefail
-        if [[ -z "${KEYSTORE_PASSWORD}" || -z "${KEY_ALIAS}" ]]; then
-          echo "Missing secrets: ANDROID_KEYSTORE_PASSWORD / ANDROID_KEY_ALIAS" >&2
+        umask 077
+        trap 'rm -f "${KEYS}/release.jks" "${KEYS}/upload.jks"' EXIT
+        norm() { tr -d ': \n' <<<"$1" | tr 'A-F' 'a-f'; }
+
+        if [[ -z "${KEYSTORE_B64:-}" || -z "${KEYSTORE_PASSWORD:-}" || -z "${KEY_ALIAS:-}" ]]; then
+          echo "::error::Signing secrets ANDROID_KEYSTORE_BASE64 / ANDROID_KEYSTORE_PASSWORD / ANDROID_KEY_ALIAS are not set. Nothing is published unsigned."
           exit 1
         fi
-        # Fall back to the keystore password when no separate key password is set.
-        export KEY_PASSWORD="${KEY_PASSWORD:-${KEYSTORE_PASSWORD}}"
+        export KEY_PASSWORD="${KEY_PASSWORD:-${KEYSTORE_PASSWORD:-}}"
+        base64 --decode <<<"${KEYSTORE_B64:-}" > "${KEYS}/release.jks"
 
-        BT="${ANDROID_HOME}/build-tools/${BUILD_TOOLS_VERSION}"
-        OUT="${RUNNER_TEMP}/release-apks"
-        mkdir -p "${OUT}"
-
-        shopt -s nullglob
-        UNSIGNED=(ui/build/outputs/apk/release/*-release-unsigned.apk)
-        if (( ${#UNSIGNED[@]} == 0 )); then
-          echo "No unsigned release APKs found" >&2
-          exit 1
-        fi
-
-        for apk in "${UNSIGNED[@]}"; do
-          base="$(basename "${apk}" -release-unsigned.apk)"      # ui, ui-arm64-v8a, ...
-          name="routevpn-${VERSION}${base#ui}.apk"                 # routevpn-3.1.5-arm64-v8a.apk
-          [[ "${base}" == "ui" ]] && name="routevpn-${VERSION}-universal.apk"
-
-          aligned="${OUT}/${name%.apk}-aligned.apk"
-          # -P 16: 16 KB page-size aligned native libs (Android 15+ requirement).
-          "${BT}/zipalign" -f -P 16 4 "${apk}" "${aligned}"
-          "${BT}/apksigner" sign \
-            --ks "${KEYSTORE_PATH}" \
-            --ks-key-alias "${KEY_ALIAS}" \
-            --ks-pass env:KEYSTORE_PASSWORD \
-            --key-pass env:KEY_PASSWORD \
-            --out "${OUT}/${name}" \
-            "${aligned}"
-          rm -f "${aligned}" "${OUT}/${name}.idsig"
-          "${BT}/apksigner" verify --verbose "${OUT}/${name}" | head -n 5
+        bt="${ANDROID_HOME}/build-tools/${BUILD_TOOLS_VERSION}"
+        apk_cert=""
+        for abi in ${ABIS} universal; do
+          name="routevpn-${VERSION}-${abi}.apk"
+          aligned="${KEYS}/${name%.apk}-aligned.apk"
+          # -P 16: native libraries aligned to 16 KB pages (required on Android 15+ devices).
+          "${bt}/zipalign" -f -P 16 4 "ui/build/outputs/apk/release/ui-${abi}-release-unsigned.apk" "${aligned}"
+          "${bt}/apksigner" sign --ks "${KEYS}/release.jks" --ks-key-alias "${KEY_ALIAS:-}" \
+            --ks-pass env:KEYSTORE_PASSWORD --key-pass env:KEY_PASSWORD \
+            --out "${DIST}/upload/${name}" "${aligned}"
+          rm -f "${aligned}" "${DIST}/upload/${name}.idsig"
+          "${bt}/zipalign" -c -P 16 4 "${DIST}/upload/${name}"
+          certs="$("${bt}/apksigner" verify --verbose --print-certs "${DIST}/upload/${name}")"
+          grep -q '^Verified using v2 scheme (APK Signature Scheme v2): true' <<<"${certs}" \
+            || { echo "::error::${name}: no valid v2 signature"; exit 1; }
+          signers="$(grep -c '^Signer #[0-9]* certificate SHA-256 digest:' <<<"${certs}" || true)"
+          (( signers == 1 )) || { echo "::error::${name}: expected exactly one signer, found ${signers}"; exit 1; }
+          cert="$(sed -n 's/^Signer #1 certificate SHA-256 digest: //p' <<<"${certs}")"
+          [[ -z "${apk_cert}" || "${apk_cert}" == "${cert}" ]] \
+            || { echo "::error::${name} is signed with a different certificate than the other APKs"; exit 1; }
+          apk_cert="${cert}"
+          echo "signed and verified ${name}"
         done
 
-        (cd "${OUT}" && sha256sum *.apk > SHA256SUMS.txt && cat SHA256SUMS.txt)
-        echo "dir=${OUT}" >> "$GITHUB_OUTPUT"
-
-    # Release notes must appear once. If a release for this tag already exists (for example
-    # one created in the GitHub UI, which has its own generated notes), do not generate again.
-    - name: Check for an existing release
-      id: existing
-      shell: bash
-      env:
-        GH_TOKEN: ${{ github.token }}
-      run: |
-        set -euo pipefail
-        code="$(curl -sS -o /dev/null -w '%{http_code}' \
-          -H "Authorization: Bearer ${GH_TOKEN}" \
-          -H "Accept: application/vnd.github+json" \
-          "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/releases/tags/${GITHUB_REF_NAME}" || echo 000)"
-        echo "Release lookup for ${GITHUB_REF_NAME}: HTTP ${code}"
-        if [[ "${code}" == "200" ]]; then
-          echo "exists=true" >> "$GITHUB_OUTPUT"
+        if [[ -n "${EXPECTED_APK_CERT:-}" ]]; then
+          [[ "$(norm "${EXPECTED_APK_CERT:-}")" == "$(norm "${apk_cert}")" ]] \
+            || { echo "::error::APK signing certificate ${apk_cert} does not match RELEASE_CERT_SHA256"; exit 1; }
+          echo "APK certificate matches RELEASE_CERT_SHA256"
         else
-          echo "exists=false" >> "$GITHUB_OUTPUT"
+          echo "::warning::RELEASE_CERT_SHA256 is not set, so the APK signing identity is not checked against an expected value. APK certificate SHA-256: ${apk_cert}"
         fi
 
-    # Always a draft: review the APKs, then publish it by hand in the GitHub UI.
-    - name: Publish GitHub Release (draft)
+        # AAB: signed with the Google Play upload key when one is configured, otherwise with the
+        # release key (see docs/ci-cd/signing.md).
+        if [[ -n "${UPLOAD_KEYSTORE_B64:-}" ]]; then
+          [[ -n "${UPLOAD_KEYSTORE_PASSWORD:-}" && -n "${UPLOAD_KEY_ALIAS:-}" ]] \
+            || { echo "::error::PLAY_UPLOAD_KEYSTORE_BASE64 is set but PLAY_UPLOAD_KEYSTORE_PASSWORD / PLAY_UPLOAD_KEY_ALIAS are not"; exit 1; }
+          base64 --decode <<<"${UPLOAD_KEYSTORE_B64:-}" > "${KEYS}/upload.jks"
+          aab_ks="${KEYS}/upload.jks"; aab_alias="${UPLOAD_KEY_ALIAS:-}"; aab_key=upload
+          export AAB_STOREPASS="${UPLOAD_KEYSTORE_PASSWORD:-}" AAB_KEYPASS="${UPLOAD_KEY_PASSWORD:-${UPLOAD_KEYSTORE_PASSWORD:-}}"
+        else
+          aab_ks="${KEYS}/release.jks"; aab_alias="${KEY_ALIAS:-}"; aab_key=release
+          export AAB_STOREPASS="${KEYSTORE_PASSWORD:-}" AAB_KEYPASS="${KEY_PASSWORD:-}"
+        fi
+        aab="${DIST}/upload/routevpn-${VERSION}-release.aab"
+        jarsigner -keystore "${aab_ks}" -storepass:env AAB_STOREPASS -keypass:env AAB_KEYPASS \
+          -signedjar "${aab}" ui/build/outputs/bundle/release/ui-release.aab "${aab_alias}" >/dev/null
+        jarsigner -verify "${aab}" | grep -q '^jar verified\.' \
+          || { echo "::error::${aab}: jarsigner verification failed"; jarsigner -verify "${aab}"; exit 1; }
+        aab_cert="$(keytool -printcert -jarfile "${aab}" | sed -n 's/^[[:space:]]*SHA256: //p' | head -n 1)"
+        [[ -n "${aab_cert}" ]] || { echo "::error::cannot read the AAB signing certificate"; exit 1; }
+        if [[ "${aab_key}" == release ]]; then
+          [[ "$(norm "${aab_cert}")" == "$(norm "${apk_cert}")" ]] \
+            || { echo "::error::AAB and APKs are not signed with the same certificate"; exit 1; }
+        elif [[ -n "${EXPECTED_UPLOAD_CERT:-}" ]]; then
+          [[ "$(norm "${EXPECTED_UPLOAD_CERT:-}")" == "$(norm "${aab_cert}")" ]] \
+            || { echo "::error::AAB upload certificate ${aab_cert} does not match PLAY_UPLOAD_CERT_SHA256"; exit 1; }
+        else
+          echo "::warning::PLAY_UPLOAD_CERT_SHA256 is not set, so the upload key is not checked against an expected value."
+        fi
+        echo "signed and verified $(basename "${aab}") with the ${aab_key} key"
+
+        echo "apk_cert=$(norm "${apk_cert}")" >> "$GITHUB_OUTPUT"
+        echo "aab_cert=$(norm "${aab_cert}")" >> "$GITHUB_OUTPUT"
+        echo "aab_key=${aab_key}" >> "$GITHUB_OUTPUT"
+
+    - name: Checksums
+      shell: bash
+      run: |
+        set -euo pipefail
+        cd "${DIST}/upload"
+        sha256sum routevpn-*.apk routevpn-*.aab > SHA256SUMS.txt
+        sha256sum -c SHA256SUMS.txt
+        [[ "$(wc -l < SHA256SUMS.txt)" == 6 ]] || { echo "::error::SHA256SUMS.txt must list 5 APKs and 1 AAB"; exit 1; }
+
+    # Optional detached OpenPGP signature of SHA256SUMS.txt with a dedicated key (not the APK key).
+    - name: Sign checksums
+      id: checksums
+      shell: bash
+      env:
+        GPG_KEY: ${{ secrets.CHECKSUMS_GPG_PRIVATE_KEY }}
+        GPG_PASSPHRASE: ${{ secrets.CHECKSUMS_GPG_PASSPHRASE }}
+        EXPECTED_FPR: ${{ vars.CHECKSUMS_GPG_FINGERPRINT }}
+      run: |
+        set -euo pipefail
+        if [[ -z "${GPG_KEY:-}" ]]; then
+          echo "::notice::CHECKSUMS_GPG_PRIVATE_KEY is not set: SHA256SUMS.txt is published without a signature."
+          echo "signed=false" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+        if ! command -v gpg >/dev/null; then
+          SUDO=""; if [[ "$(id -u)" != "0" ]]; then SUDO="sudo"; fi
+          ${SUDO} apt-get update -qq && ${SUDO} apt-get install -y --no-install-recommends gnupg >/dev/null
+        fi
+        export GNUPGHOME="${KEYS}/gnupg"
+        trap 'gpgconf --kill all >/dev/null 2>&1 || true; rm -rf "${GNUPGHOME}"' EXIT
+        mkdir -m 700 -p "${GNUPGHOME}"
+        gpg --batch --quiet --import <<<"${GPG_KEY:-}"
+        fpr="$(gpg --batch --with-colons --list-secret-keys | awk -F: '$1=="fpr"{print $10; exit}')"
+        if [[ -n "${EXPECTED_FPR:-}" && "$(tr -d ' ' <<<"${EXPECTED_FPR:-}" | tr 'a-f' 'A-F')" != "${fpr}" ]]; then
+          echo "::error::checksum signing key ${fpr} does not match CHECKSUMS_GPG_FINGERPRINT"; exit 1
+        fi
+        cd "${DIST}/upload"
+        gpg --batch --yes --pinentry-mode loopback --passphrase-fd 0 --local-user "${fpr}" \
+          --armor --output SHA256SUMS.txt.sig --detach-sign SHA256SUMS.txt <<<"${GPG_PASSPHRASE:-}"
+        gpg --batch --armor --export "${fpr}" > routevpn-checksums-signing-key.asc
+        gpg --batch --verify SHA256SUMS.txt.sig SHA256SUMS.txt
+        echo "signed=true" >> "$GITHUB_OUTPUT"
+        echo "fingerprint=${fpr}" >> "$GITHUB_OUTPUT"
+
+    - name: SBOM
+      shell: bash
+      env:
+        VERSION: ${{ steps.version.outputs.version }}
+        APP_ID: ${{ steps.version.outputs.application_id }}
+      run: |
+        set -euo pipefail
+        git submodule status > "${RUNNER_TEMP}/submodules.txt"
+        artifacts=()
+        for f in "${DIST}"/upload/routevpn-*.apk "${DIST}"/upload/routevpn-*.aab; do artifacts+=(--artifact "$f"); done
+        python3 scripts/ci/release_tool.py sbom \
+          --version "${VERSION}" --tag "${GITHUB_REF_NAME}" --commit "${GITHUB_SHA}" \
+          --application-id "${APP_ID}" --repository "${GITHUB_REPOSITORY}" --server-url "${GITHUB_SERVER_URL}" \
+          --out "${DIST}/upload/SBOM.spdx.json" \
+          --gradle-deps ui/build/sbom/release-dependencies.txt \
+          --go-mod tunnel/tools/libwg-go/go.mod \
+          --submodules "${RUNNER_TEMP}/submodules.txt" --build-only-submodule elf-cleaner \
+          --gradle-version "$(sed -n 's/.*gradle-\(.*\)-bin\.zip/\1/p' gradle/wrapper/gradle-wrapper.properties)" \
+          --agp-version "$(sed -n 's/^agp = "\(.*\)"/\1/p' gradle/libs.versions.toml)" \
+          --kotlin-version "$(sed -n 's/^kotlin = "\(.*\)"/\1/p' gradle/libs.versions.toml)" \
+          --ndk-version "$(sed -n 's/.*ndkVersion = "\(.*\)"/\1/p' settings.gradle.kts)" \
+          --build-tools-version "${BUILD_TOOLS_VERSION}" "${artifacts[@]}"
+        python3 scripts/ci/release_tool.py validate-sbom "${DIST}/upload/SBOM.spdx.json"
+
+    # GitHub artifact attestations need a public repository or GitHub Enterprise Cloud. If they are
+    # unavailable the release continues, and release.json / the release notes say so.
+    - name: Build provenance attestation
+      id: attest
+      continue-on-error: true
+      uses: actions/attest-build-provenance@v2
+      with:
+        subject-path: |
+          ${{ env.DIST }}/upload/routevpn-*.apk
+          ${{ env.DIST }}/upload/routevpn-*.aab
+
+    - name: Release metadata and notes
+      shell: bash
+      env:
+        VERSION: ${{ steps.version.outputs.version }}
+        VERSION_CODE: ${{ steps.version.outputs.version_code }}
+        APP_ID: ${{ steps.version.outputs.application_id }}
+        MIN_SDK: ${{ steps.version.outputs.min_sdk }}
+        PRERELEASE: ${{ steps.version.outputs.prerelease }}
+        APK_CERT: ${{ steps.sign.outputs.apk_cert }}
+        AAB_CERT: ${{ steps.sign.outputs.aab_cert }}
+        CHECKSUMS_SIGNED: ${{ steps.checksums.outputs.signed }}
+        CHECKSUMS_FPR: ${{ steps.checksums.outputs.fingerprint }}
+        ATTESTED: ${{ steps.attest.outcome == 'success' && 'true' || 'false' }}
+        MANDATORY: ${{ vars.RELEASE_MANDATORY_UPDATE == 'true' && 'true' || 'false' }}
+      run: |
+        set -euo pipefail
+        run_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+        artifacts=()
+        for f in "${DIST}"/upload/routevpn-*.apk "${DIST}"/upload/routevpn-*.aab; do artifacts+=(--artifact "$f"); done
+        python3 scripts/ci/release_tool.py release-json \
+          --version "${VERSION}" --version-code "${VERSION_CODE}" --tag "${GITHUB_REF_NAME}" --commit "${GITHUB_SHA}" \
+          --application-id "${APP_ID}" --min-sdk "${MIN_SDK}" --repository "${GITHUB_REPOSITORY}" \
+          --server-url "${GITHUB_SERVER_URL}" --workflow-run-url "${run_url}" --prerelease "${PRERELEASE}" \
+          --mandatory-update "${MANDATORY}" --google-play false \
+          --apk-cert-sha256 "${APK_CERT}" --aab-cert-sha256 "${AAB_CERT}" \
+          --checksums-signed "${CHECKSUMS_SIGNED}" --attestation "${ATTESTED}" \
+          "${artifacts[@]}" --out "${DIST}/upload/release.json"
+        python3 -m json.tool "${DIST}/upload/release.json" >/dev/null
+
+        notes="${DIST}/RELEASE_NOTES.md"
+        cat "${DIST}/upload/CHANGELOG-v${VERSION}.md" > "${notes}"
+        {
+          echo
+          echo "## Verification"
+          echo
+          echo "- APK signing certificate SHA-256: \`${APK_CERT}\`"
+          echo "- Checksums: \`sha256sum -c SHA256SUMS.txt\`"
+          if [[ "${CHECKSUMS_SIGNED}" == true ]]; then
+            echo "- \`SHA256SUMS.txt.sig\` is an OpenPGP signature by key \`${CHECKSUMS_FPR}\`: \`gpg --verify SHA256SUMS.txt.sig SHA256SUMS.txt\`"
+          else
+            echo "- \`SHA256SUMS.txt\` is not signed for this release."
+          fi
+          if [[ "${ATTESTED}" == true ]]; then
+            echo "- Build provenance: \`gh attestation verify <file> --repo ${GITHUB_REPOSITORY}\`"
+          else
+            echo "- No GitHub build provenance attestation was created for this release."
+          fi
+          echo
+          echo "Details: docs/ci-cd/checksum-verification.md and docs/ci-cd/sbom-and-provenance.md."
+        } >> "${notes}"
+
+        # Defence in depth: never upload key material.
+        if find "${DIST}/upload" -type f \( -iname '*.jks' -o -iname '*.keystore' -o -iname '*.p12' -o -iname '*.pem' -o -iname '*.key' \) | grep -q .; then
+          echo "::error::key material found in the upload directory"; exit 1
+        fi
+        ls -l "${DIST}/upload"
+
+    # Always a draft: review the assets, then publish the release in the GitHub UI.
+    # Not pinned to a SHA yet (see docs/ci-cd/secrets-and-permissions.md#action-pinning).
+    - name: Publish draft GitHub Release
       uses: softprops/action-gh-release@v2
       with:
-        name: RouteVPN ${{ env.VERSION }}
+        tag_name: ${{ github.ref_name }}
+        name: RouteVPN ${{ steps.version.outputs.version }}
+        body_path: ${{ env.DIST }}/RELEASE_NOTES.md
         draft: true
-        generate_release_notes: ${{ steps.existing.outputs.exists != 'true' }}
+        prerelease: ${{ steps.version.outputs.prerelease == 'true' }}
         fail_on_unmatched_files: true
-        files: |
-          ${{ steps.sign.outputs.dir }}/*.apk
-          ${{ steps.sign.outputs.dir }}/SHA256SUMS.txt
+        files: ${{ env.DIST }}/upload/*
 
-    # The runner keeps its workspace between jobs, so never leave the keystore behind.
-    - name: Remove keystore
+    - name: Summary
       if: ${{ always() }}
       shell: bash
-      run: rm -f "${RUNNER_TEMP}/release.keystore.jks"
+      env:
+        APK_CERT: ${{ steps.sign.outputs.apk_cert }}
+        AAB_KEY: ${{ steps.sign.outputs.aab_key }}
+        CHECKSUMS_SIGNED: ${{ steps.checksums.outputs.signed }}
+        ATTEST_OUTCOME: ${{ steps.attest.outcome }}
+      run: |
+        {
+          echo "### Release ${GITHUB_REF_NAME}"
+          echo
+          echo "| Check | Result |"
+          echo "|---|---|"
+          echo "| APK certificate SHA-256 | \`${APK_CERT:-n/a}\` |"
+          echo "| AAB signed with | ${AAB_KEY:-n/a} key |"
+          echo "| Checksums signed | ${CHECKSUMS_SIGNED:-n/a} |"
+          echo "| Provenance attestation | ${ATTEST_OUTCOME:-n/a} |"
+          echo
+          echo '```'
+          cat "${DIST}/upload/SHA256SUMS.txt" 2>/dev/null || echo "no checksums"
+          echo '```'
+        } >> "$GITHUB_STEP_SUMMARY"
+
+    - name: Remove key material
+      if: ${{ always() }}
+      shell: bash
+      run: rm -rf "${KEYS:-${RUNNER_TEMP}/keys}"
+
+    - name: Container resources (after build)
+      if: ${{ always() }}
+      shell: bash
+      run: |
+        set +e
+        echo "runner: ${RUNNER_NAME}"
+        for f in memory.max memory.current memory.events; do echo "-- cgroup $f"; cat "/sys/fs/cgroup/$f" 2>/dev/null; done
+        exit 0

@@ -1,8 +1,8 @@
 name: CI
 run-name: "CI • ${{ github.event.pull_request.title || github.ref_name }}"
 
-# Fast feedback on every pull request and on master: unit tests + debug APK.
-# No secrets are used, so this never signs anything.
+# Fast feedback on every pull request and on master: unit tests, debug APK and a check of the
+# release tooling (dependency list -> SBOM). No secrets are used, so this never signs anything.
 on:
   pull_request:
   push:
@@ -19,62 +19,60 @@ concurrency:
 jobs:
   build:
     name: "Unit tests & debug build"
+    # Pull requests from forks would run untrusted code on the self-hosted runner: skip them.
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
     runs-on: [self-hosted, docker-runner]
     timeout-minutes: 60
 
     steps:
     - name: Checkout
-      uses: actions/checkout@v5
+      uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
       with:
         submodules: recursive
+        persist-credentials: false
 
-    # Runner containers have different memory limits; print them so a killed Gradle daemon
-    # ("daemon disappeared unexpectedly") can be told apart from a real failure (oom_kill > 0).
-    - name: Container resources (before build)
+    - name: Set up build environment
+      uses: ./.github/actions/android-env
+      with:
+        # Only master writes the Gradle cache, so pull requests cannot poison it.
+        gradle-cache-read-only: ${{ github.ref != 'refs/heads/master' }}
+        min-memory-mib: "1200"
+
+    - name: Release tooling unit tests
       shell: bash
       run: |
-        set +e
-        echo "runner: ${RUNNER_NAME}"
-        free -m
-        for f in memory.max memory.current memory.events; do echo "-- cgroup $f"; cat "/sys/fs/cgroup/$f" 2>/dev/null; done
-        exit 0
-
-    - name: Set up JDK
-      uses: actions/setup-java@v5
-      with:
-        distribution: temurin
-        java-version: "17"
-
-    # libwg-go (amneziawg-go) is built with Go during the NDK/CMake step.
-    - name: Set up Go
-      uses: actions/setup-go@v6
-      with:
-        go-version-file: tunnel/tools/libwg-go/go.mod
-        cache-dependency-path: tunnel/tools/libwg-go/go.sum
-
-    - name: Set up Gradle
-      uses: gradle/actions/setup-gradle@v5
-
-    - name: Set up Android SDK
-      uses: android-actions/setup-android@v3
-      with:
-        packages: platform-tools
+        python3 scripts/ci/test_release_tool.py
+        python3 scripts/ci/test_play_publish.py
 
     # Fewer parallel tasks keeps peak memory down on the shared runner container.
-    - name: Unit tests and debug APK
-      # The native build fetches Go 1.24.2 itself while go.mod requires >= 1.25, which relies on
-      # automatic toolchain download. setup-go v6 exports GOTOOLCHAIN=local, so restore the default.
-      env:
-        GOTOOLCHAIN: auto
+    - name: Unit tests, debug APK and release dependency list
       shell: bash
       run: |
         set -euo pipefail
         chmod +x ./gradlew
         ./gradlew --no-daemon --stacktrace --max-workers=2 -Dorg.gradle.parallel=false \
-          :tunnel:testDebugUnitTest :ui:assembleDebug
+          :tunnel:testDebugUnitTest :ui:assembleDebug :ui:writeReleaseDependencies
+
+    # Same SBOM generation as release.yml, with the debug APK standing in for release artifacts.
+    - name: SBOM dry run
+      shell: bash
+      run: |
+        set -euo pipefail
+        git submodule status > "${RUNNER_TEMP}/submodules.txt"
+        python3 scripts/ci/release_tool.py sbom \
+          --version ci --tag "ci-${GITHUB_SHA::7}" --commit "${GITHUB_SHA}" \
+          --application-id "$(sed -n 's/^amneziawgPackageName=//p' gradle.properties)" \
+          --repository "${GITHUB_REPOSITORY}" --server-url "${GITHUB_SERVER_URL}" \
+          --out "${RUNNER_TEMP}/SBOM.spdx.json" \
+          --gradle-deps ui/build/sbom/release-dependencies.txt \
+          --go-mod tunnel/tools/libwg-go/go.mod \
+          --submodules "${RUNNER_TEMP}/submodules.txt" --build-only-submodule elf-cleaner \
+          --artifact ui/build/outputs/apk/debug/ui-debug.apk
+        python3 scripts/ci/release_tool.py validate-sbom "${RUNNER_TEMP}/SBOM.spdx.json"
+        echo "$(wc -l < ui/build/sbom/release-dependencies.txt) resolved release dependencies"
 
     - name: Upload debug APK
-      uses: actions/upload-artifact@v5
+      uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
       with:
         name: debug-apk
         path: ui/build/outputs/apk/debug/*.apk
@@ -83,7 +81,7 @@ jobs:
 
     - name: Upload test reports
       if: ${{ failure() }}
-      uses: actions/upload-artifact@v5
+      uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
       with:
         name: test-reports
         path: tunnel/build/reports/tests/

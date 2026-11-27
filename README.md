@@ -11,8 +11,8 @@ Android 5.0 (API 21) or newer. Release APKs are built for `arm64-v8a`, `armeabi-
 ## Building
 
 ```
-$ git clone --recurse-submodules https://github.com/RouteTechnologies/amneziawg-android
-$ cd amneziawg-android
+$ git clone --recurse-submodules https://github.com/rtlbd/routevpn-android
+$ cd routevpn-android
 $ ./gradlew assembleRelease
 ```
 
@@ -22,12 +22,14 @@ Requires JDK 17, Go (version from `tunnel/tools/libwg-go/go.mod`) and the Androi
 
 ## Releasing
 
-Pushing a tag such as `v3.1.5` runs `.github/workflows/release.yml` on the self-hosted `docker-runner`.
-It builds signed APKs (universal plus one per ABI) and attaches them with `SHA256SUMS.txt` to a GitHub Release.
-The tag sets `versionName`; bump `amneziawgVersionCode` in `gradle.properties` for every release.
+Releases are built, signed and published as a draft GitHub Release by `.github/workflows/release.yml`
+when a tag such as `v1.0.5` is pushed. The tag must equal `amneziawgVersionName` in
+`gradle.properties`, `amneziawgVersionCode` must be higher than in every earlier release, and
+`CHANGELOG.md` needs a section for the version. Assets: per-ABI and universal APKs, a signed AAB,
+`SHA256SUMS.txt`, an SPDX SBOM, `release.json` and the changelog section.
 
-Required repository secrets: `ANDROID_KEYSTORE_BASE64`, `ANDROID_KEYSTORE_PASSWORD`, `ANDROID_KEY_ALIAS`
-and optionally `ANDROID_KEY_PASSWORD`.
+CI/CD documentation, including the release procedure, signing, download verification and the
+(disabled) Google Play integration: [docs/ci-cd/](docs/ci-cd/README.md).
 
 ## Application id
 

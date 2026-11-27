@@ -16,3 +16,7 @@ build/
 *.jks
 gradlew.bat
 maint/
+*.keystore
+*.p12
+*.b64
+__pycache__/

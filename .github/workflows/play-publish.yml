@@ -1,0 +1,116 @@
+name: Google Play publish
+run-name: "Google Play • ${{ inputs.tag }} → ${{ inputs.track }}${{ inputs.dry-run && ' (dry run)' || '' }}"
+
+# Uploads the signed AAB of an already published GitHub Release to Google Play.
+# DISABLED by default and never triggered by tags. It only runs when:
+#   1. the repository variable PLAY_PUBLISHING_ENABLED is 'true',
+#   2. someone starts it by hand, and
+#   3. a reviewer approves the protected 'google-play' environment.
+# dry-run (default) checks credentials, package and versionCode without uploading.
+# See docs/ci-cd/google-play.md before enabling.
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag whose AAB to upload (the GitHub Release must be published)"
+        required: true
+      track:
+        description: "Google Play track"
+        type: choice
+        default: internal
+        options: [internal, alpha, beta, production]
+      status:
+        description: "Release status on the track (new apps must use draft)"
+        type: choice
+        default: draft
+        options: [draft, completed]
+      dry-run:
+        description: "Only validate; do not upload"
+        type: boolean
+        default: true
+
+permissions: {}
+
+concurrency:
+  group: play-publish
+  cancel-in-progress: false
+
+jobs:
+  disabled:
+    name: "Google Play publishing is disabled"
+    if: ${{ vars.PLAY_PUBLISHING_ENABLED != 'true' }}
+    runs-on: [self-hosted, docker-runner]
+    steps:
+    - name: Explain
+      run: echo "::notice::Google Play publishing is disabled. Set the repository variable PLAY_PUBLISHING_ENABLED=true after following docs/ci-cd/google-play.md."
+
+  publish:
+    name: "Upload ${{ inputs.tag }} to ${{ inputs.track }}"
+    if: ${{ vars.PLAY_PUBLISHING_ENABLED == 'true' }}
+    runs-on: [self-hosted, docker-runner]
+    timeout-minutes: 30
+    environment: google-play
+    permissions:
+      contents: read   # read the GitHub Release assets
+
+    steps:
+    # Scripts come from the ref the workflow was started from (normally master), not from the tag.
+    - name: Checkout
+      uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      with:
+        persist-credentials: false
+
+    - name: Set up JDK (jarsigner)
+      uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
+      with:
+        distribution: temurin
+        java-version: "17"
+
+    - name: Ensure python3 and openssl
+      shell: bash
+      run: |
+        set -euo pipefail
+        missing=()
+        command -v python3 >/dev/null || missing+=(python3)
+        command -v openssl >/dev/null || missing+=(openssl)
+        if (( ${#missing[@]} )); then
+          SUDO=""; if [[ "$(id -u)" != "0" ]]; then SUDO="sudo"; fi
+          ${SUDO} apt-get update -qq && ${SUDO} apt-get install -y --no-install-recommends "${missing[@]}" >/dev/null
+        fi
+
+    - name: Download and verify the release AAB
+      id: release
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ github.token }}
+        TAG: ${{ inputs.tag }}
+      run: |
+        set -euo pipefail
+        out="${RUNNER_TEMP}/play"
+        rm -rf "${out}" && mkdir -p "${out}"
+        python3 scripts/ci/play_publish.py download --repository "${GITHUB_REPOSITORY}" --tag "${TAG}" --out "${out}"
+        jarsigner -verify "${out}"/routevpn-*-release.aab | grep -q '^jar verified\.' \
+          || { echo "::error::the AAB signature does not verify"; exit 1; }
+
+    - name: Publish to Google Play
+      shell: bash
+      env:
+        PLAY_SERVICE_ACCOUNT_JSON: ${{ secrets.PLAY_SERVICE_ACCOUNT_JSON }}
+        TRACK: ${{ inputs.track }}
+        STATUS: ${{ inputs.status }}
+        DRY_RUN: ${{ inputs.dry-run }}
+        AAB: ${{ steps.release.outputs.aab }}
+        PACKAGE: ${{ steps.release.outputs.package }}
+        VERSION_CODE: ${{ steps.release.outputs.version_code }}
+        VERSION: ${{ steps.release.outputs.version }}
+      run: |
+        set -euo pipefail
+        args=(--package "${PACKAGE}" --aab "${AAB}" --version-code "${VERSION_CODE}"
+              --release-name "${VERSION}" --track "${TRACK}" --status "${STATUS}")
+        [[ "${DRY_RUN}" == true ]] && args+=(--dry-run)
+        python3 scripts/ci/play_publish.py publish "${args[@]}"
+
+    - name: Clean up
+      if: ${{ always() }}
+      shell: bash
+      run: rm -rf "${RUNNER_TEMP}/play"
