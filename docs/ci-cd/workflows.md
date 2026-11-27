@@ -37,9 +37,12 @@ signing secrets are used only for version tags.
 
 ## emulator.yml
 
-Input `api-levels`, a JSON array. Jobs run one at a time (`max-parallel: 1`, `concurrency`), need
-`/dev/kvm` and at least 3 GiB of container memory (3.45 GiB worked for screenshots; 4 GiB is recommended), and install the emulator's X11/GL libraries
-with `apt-get` ([self-hosted-runner.md](self-hosted-runner.md)).
+Inputs: `api-levels` (a JSON array) and `mode` (`tests`, `screenshots` or `both`). `screenshots` runs
+`scripts/ci/emulator-run.sh`, which installs the debug APK, starts the app and saves real screenshots
+(start page, add-tunnel sheet, tunnel editor) as the artifact `screenshots-api-<N>`. Jobs run one at
+a time (`max-parallel: 1`, `concurrency`), need `/dev/kvm` and at least 3 GiB of container memory
+(4 GiB is recommended; 3.95 GiB is the largest limit tested with the smoke tests), and install the
+emulator's X11/GL libraries with `apt-get` ([self-hosted-runner.md](self-hosted-runner.md)).
 
 ## play-publish.yml
 
