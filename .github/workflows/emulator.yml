@@ -1,8 +1,8 @@
 name: Emulator smoke tests
-run-name: "Emulator • API ${{ inputs.api-levels || 'default set' }}"
+run-name: "Emulator • ${{ inputs.mode || 'tests' }} • API ${{ inputs.api-levels || 'default set' }}"
 
-# Runs the instrumented smoke tests (ui/src/androidTest) on Android emulators, one API level at a
-# time. Manual only: each level downloads a system image and boots an emulator (several minutes).
+# Runs the instrumented smoke tests (ui/src/androidTest) and/or takes real screenshots of the app
+# (scripts/ci/emulator-run.sh) on Android emulators, one API level at a time. Manual only: each level downloads a system image and boots an emulator (several minutes).
 # Needs /dev/kvm inside the runner container (docker run --device /dev/kvm ...).
 on:
   workflow_dispatch:
@@ -11,6 +11,11 @@ on:
         description: "API levels as a JSON array, e.g. [21,23,34]"
         required: false
         default: "[21,23,24,26,29,34]"
+      mode:
+        description: "tests = smoke tests; screenshots = screenshots of the app; both = screenshots, then tests"
+        type: choice
+        default: tests
+        options: [tests, screenshots, both]
 
 permissions:
   contents: read
@@ -114,8 +119,11 @@ jobs:
         echo "== kernel log (best effort) =="; dmesg 2>/dev/null | tail -n 25
         exit 0
 
-    - name: Instrumented smoke tests (API ${{ matrix.api }})
+    - name: Emulator (${{ inputs.mode || 'tests' }}, API ${{ matrix.api }})
       uses: reactivecircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d # v2
+      env:
+        MODE: ${{ inputs.mode || 'tests' }}
+        SHOT_DIR: ${{ github.workspace }}/build/screenshots
       with:
         api-level: ${{ matrix.api }}
         arch: x86_64
@@ -126,7 +134,7 @@ jobs:
         disable-animations: true
         emulator-boot-timeout: 300
         emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none -no-snapshot -no-metrics -show-kernel
-        script: ./gradlew --no-daemon --stacktrace --max-workers=2 -Dorg.gradle.parallel=false :ui:connectedDebugAndroidTest
+        script: bash scripts/ci/emulator-run.sh
 
     - name: Resource diagnostics (after emulator)
       if: ${{ always() }}
@@ -150,3 +158,12 @@ jobs:
         path: ui/build/reports/androidTests/
         if-no-files-found: ignore
         retention-days: 7
+
+    - name: Upload screenshots
+      if: ${{ always() && inputs.mode != 'tests' }}
+      uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+      with:
+        name: screenshots-api-${{ matrix.api }}
+        path: build/screenshots/
+        if-no-files-found: warn
+        retention-days: 14
