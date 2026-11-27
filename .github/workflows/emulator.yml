@@ -55,12 +55,12 @@ jobs:
         free -m
 
     # The emulator needs about 2 GB on its own and Gradle needs more. A container capped at ~1.4 GB had its
-    # processes OOM-killed (the emulator vanished silently during boot); 4 GiB worked for API 21-34.
+    # processes OOM-killed (the emulator vanished silently during boot); 3.95 GiB worked for API 21-34 (the check fails below 3 GiB).
     - name: Set up build environment
       uses: ./.github/actions/android-env
       with:
         gradle-cache-read-only: "true"
-        min-memory-mib: "3584"
+        min-memory-mib: "3072"
 
     # The emulator binary links against X11/GL/audio libraries even when run with -no-window, and the
     # runner container image does not ship them ("error while loading shared libraries: libX11.so.6").

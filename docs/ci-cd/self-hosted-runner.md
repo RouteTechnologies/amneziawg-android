@@ -9,7 +9,7 @@ All workflows use runners with the labels `self-hosted` and `docker-runner` (gro
 |---|---|
 | Linux x86_64 container, `bash`, `git`, `curl`, `unzip` | Workflow steps and SDK setup |
 | Root or password-less `sudo` with `apt-get` | python3, gnupg and emulator libraries are installed on demand when missing |
-| Container memory limit ≥ 1.2 GiB (CI, builds, release); ≥ 3.5 GiB (emulator); 4 GiB+ recommended | Enforced by the "Check runner resources" step; below ~1.4 GiB Gradle gets OOM-killed |
+| Container memory limit ≥ 1.2 GiB (CI, builds, release); ≥ 3 GiB (emulator; 4 GiB+ recommended) | Enforced by the "Check runner resources" step; below ~1.4 GiB Gradle gets OOM-killed |
 | `/dev/kvm` passed into the container (emulator only) | Hardware-accelerated emulators |
 | Disk: about 20 GB free | Android SDK, NDK, system images, Gradle and Go caches |
 | Outbound HTTPS to GitHub, `dl.google.com`, `maven.google.com`, Maven Central, Gradle plugin portal, `proxy.golang.org`, `go.dev`, `storage.googleapis.com`, Ubuntu mirrors | Dependencies and toolchains |

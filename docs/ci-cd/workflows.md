@@ -38,7 +38,7 @@ signing secrets are used only for version tags.
 ## emulator.yml
 
 Input `api-levels`, a JSON array. Jobs run one at a time (`max-parallel: 1`, `concurrency`), need
-`/dev/kvm` and at least 3.5 GiB of container memory, and install the emulator's X11/GL libraries
+`/dev/kvm` and at least 3 GiB of container memory (3.45 GiB worked for screenshots; 4 GiB is recommended), and install the emulator's X11/GL libraries
 with `apt-get` ([self-hosted-runner.md](self-hosted-runner.md)).
 
 ## play-publish.yml
