@@ -106,12 +106,45 @@ jobs:
           fi
         done
 
+    # The emulator needs several GiB for the system image, the AVD and the Gradle build. A runner that
+    # ran out of disk ("Free space left: 0 MB" while installing the system image) made the emulator stop
+    # with "Your device does not have enough disk space". Keep only the system image of this API level
+    # and fail early, with numbers, when there is still too little room.
+    - name: Free disk space and check it
+      shell: bash
+      env:
+        API: ${{ matrix.api }}
+        MIN_FREE_MIB: "6144"
+      run: |
+        set -euo pipefail
+        sdk="${ANDROID_HOME:-/root/.android/sdk}"
+        avd_home="${ANDROID_AVD_HOME:-/root/.android/avd}"
+        echo "== disk before cleanup =="; df -h / "${GITHUB_WORKSPACE}"
+        if [[ -d "${sdk}/system-images" ]]; then
+          for dir in "${sdk}"/system-images/android-*; do
+            [[ -d "${dir}" && "$(basename "${dir}")" != "android-${API}" ]] || continue
+            echo "removing unused system image ${dir}"
+            rm -rf "${dir}"
+          done
+        fi
+        rm -rf "${avd_home}/test.avd" "${avd_home}/test.ini"   # AVD left behind by an earlier job
+        echo "== disk after cleanup =="; df -h / "${GITHUB_WORKSPACE}"
+        free_mib="$(df -Pm / | awk 'NR==2{print $4}')"
+        workspace_free_mib="$(df -Pm "${GITHUB_WORKSPACE}" | awk 'NR==2{print $4}')"
+        if (( free_mib < MIN_FREE_MIB || workspace_free_mib < MIN_FREE_MIB )); then
+          echo "::error::Only ${free_mib} MiB (/) and ${workspace_free_mib} MiB (workspace) are free; the emulator job needs about ${MIN_FREE_MIB} MiB. Free disk space on the runner host (docker system prune, old images/volumes, stale runner work directories)."
+          du -xsh /root/.android /root/.gradle /root/.cache "${GITHUB_WORKSPACE}" 2>/dev/null | sort -h || true
+          exit 1
+        fi
+
     - name: Resource diagnostics (before emulator)
       shell: bash
       run: |
         set +e
         echo "== memory =="; free -m
         echo "== /dev/shm =="; df -h /dev/shm
+        echo "== disk =="; df -h / "${GITHUB_WORKSPACE}" 2>/dev/null
+        echo "== largest directories =="; du -xsh /root/.android /root/.gradle /root/.cache "${GITHUB_WORKSPACE}" 2>/dev/null | sort -h
         echo "== container cgroup (memory.events oom_kill > 0 means the kernel killed a process) =="
         for f in memory.max memory.current memory.events; do echo "-- $f"; cat "/sys/fs/cgroup/$f" 2>/dev/null; done
         echo "== largest processes =="; ps -eo pid,rss,comm --sort=-rss | head -n 8
@@ -143,12 +176,21 @@ jobs:
         set +e
         echo "== memory =="; free -m
         echo "== /dev/shm =="; df -h /dev/shm
+        echo "== disk =="; df -h / "${GITHUB_WORKSPACE}" 2>/dev/null
+        echo "== largest directories =="; du -xsh /root/.android /root/.gradle /root/.cache "${GITHUB_WORKSPACE}" 2>/dev/null | sort -h
         echo "== container cgroup (memory.events oom_kill > 0 means the kernel killed a process) =="
         for f in memory.max memory.current memory.events; do echo "-- $f"; cat "/sys/fs/cgroup/$f" 2>/dev/null; done
         echo "== largest processes =="; ps -eo pid,rss,comm --sort=-rss | head -n 8
         echo "== emulator crash data =="; ls -la /tmp/android-unknown 2>/dev/null
         echo "== kernel log (best effort) =="; dmesg 2>/dev/null | tail -n 25
         exit 0
+
+    - name: Remove the AVD
+      if: ${{ always() }}
+      shell: bash
+      run: |
+        avd_home="${ANDROID_AVD_HOME:-/root/.android/avd}"
+        rm -rf "${avd_home}/test.avd" "${avd_home}/test.ini"
 
     - name: Upload test reports
       if: ${{ always() }}
