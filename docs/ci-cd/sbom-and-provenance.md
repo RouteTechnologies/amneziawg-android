@@ -40,7 +40,7 @@ on GitHub Enterprise Cloud. If attestation fails, the release continues; `releas
 ### Verifying provenance
 
 ```sh
-gh attestation verify routevpn-1.0.4-arm64-v8a.apk --repo RouteTechnologies/amneziawg-android
+gh attestation verify routevpn-1.0.4-arm64-v8a.apk --repo rtlbd/routevpn-android
 ```
 
 The output shows the workflow, commit and tag that built the file. Self-hosted runners are recorded

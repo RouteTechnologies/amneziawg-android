@@ -7,8 +7,8 @@ JDK 17, the Android SDK (`ANDROID_HOME`), and network access; Gradle downloads t
 requires Go 1.25, needs automatic Go toolchain download: do not set `GOTOOLCHAIN=local`.
 
 ```sh
-git clone --recurse-submodules https://github.com/RouteTechnologies/amneziawg-android
-cd amneziawg-android
+git clone --recurse-submodules https://github.com/rtlbd/routevpn-android
+cd routevpn-android
 ./gradlew :tunnel:testDebugUnitTest          # unit tests
 ./gradlew :ui:assembleDebug                  # debug APK (io.routedns.awg.debug)
 ./gradlew :ui:bundleRelease                  # unsigned release AAB (all ABIs)

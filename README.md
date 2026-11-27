@@ -11,8 +11,8 @@ Android 5.0 (API 21) or newer. Release APKs are built for `arm64-v8a`, `armeabi-
 ## Building
 
 ```
-$ git clone --recurse-submodules https://github.com/RouteTechnologies/amneziawg-android
-$ cd amneziawg-android
+$ git clone --recurse-submodules https://github.com/rtlbd/routevpn-android
+$ cd routevpn-android
 $ ./gradlew assembleRelease
 ```
 

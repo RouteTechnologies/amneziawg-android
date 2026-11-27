@@ -51,3 +51,23 @@ a new runner container with the same labels. Caches are rebuilt on the next run.
 
 Restore them from your offline copies (keystore + password, GPG key, service account JSON). The
 workflows contain no key material, and nothing in the repository can recreate a key.
+
+## After transferring or renaming the repository
+
+The repository moved from `RouteTechnologies/amneziawg-android` to `rtlbd/routevpn-android`
+(2026-11-27). Old URLs redirect, workflows use `GITHUB_REPOSITORY` so they follow the new name, and
+`release.json` links are generated from it. Check the following after any transfer:
+
+* **Runners** are registered per organization or repository. A runner group of the old organization
+  is not available to the new one: re-register the runners or give the new repository access to a
+  runner group with the labels `self-hosted` and `docker-runner`. Queued runs are cancelled by the
+  transfer and must be started again.
+* **Secrets and variables**: repository and environment secrets/variables normally move with the
+  repository; organization-level ones do not. Verify `ANDROID_KEYSTORE_*`, `RELEASE_CERT_SHA256` and
+  the other entries in [secrets-and-permissions.md](secrets-and-permissions.md).
+* **Environments** (`github-release`, `google-play`), **rulesets** and branch protection: confirm
+  they still exist and still restrict tags and reviewers.
+* **Build provenance** attestations name the repository they were built in; releases attested before
+  a rename must be verified against the old name (`gh attestation verify ... --repo <old name>`).
+* Update remotes (`git remote set-url origin https://github.com/rtlbd/routevpn-android`), links in
+  documentation and any Google Play listing or website that points to the repository.
